@@ -7,3 +7,4 @@ shap
 scikit-learn
 xgboost
 openpyxl
+shap
