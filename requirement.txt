@@ -1,0 +1,11 @@
+streamlit
+pandas
+numpy
+matplotlib
+seaborn
+xgboost
+scikit-learn
+shap
+openpyxl
+langchain
+faiss-cpu
