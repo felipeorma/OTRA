@@ -1,14 +1,9 @@
-# requirements.txt
-streamlit==1.36.0
-pandas==2.2.2
-numpy==1.26.4
-matplotlib==3.8.4
-seaborn==0.13.2
-xgboost==2.0.3
-scikit-learn==1.4.2
-shap==0.45.1
-openpyxl==3.1.5
-langchain==0.2.16
-langchain-community==0.2.16
-faiss-cpu==1.8.0.post1
-tiktoken==0.7.0
+streamlit
+pandas
+numpy
+matplotlib
+seaborn
+shap
+scikit-learn
+xgboost
+openpyxl
