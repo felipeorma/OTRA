@@ -5,10 +5,10 @@
 # Funciones clave:
 # - Carga de 1+ archivos (XLSX/CSV) con autodetección de hoja (XLSX)
 # - Filtro por timeframe (fecha / temporada)
-# - Modelo ML (XGBoost) de valor de mercado, métricas CV/holdout, y explicabilidad (SHAP)
+# - Modelo ML (XGBoost) de valor de mercado + métricas CV/holdout
 # - Perfil de club por posición (PCA) y fit_score jugador→club (0–1)
 # - Ranking de mejores incorporaciones EXCLUYENDO jugadores del club destino
-# - RAG opcional (chat) con tu OPENAI_API_KEY pegada desde UI (nunca guardada)
+# - RAG opcional (chat) con TF-IDF + ChatOpenAI (sin FAISS, compatible Py 3.13)
 # - Valores monetarios redondeados a millones (solo en display)
 # - Descarga de CSVs y glosario detallado
 # ===============================================================
@@ -26,21 +26,13 @@ from sklearn.model_selection import train_test_split, KFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 from xgboost import XGBRegressor
 
-# SHAP es opcional (mostramos fallback si falta)
+# RAG (chat)
 try:
-    import shap
-    SHAP_AVAILABLE = True
-except Exception:
-    SHAP_AVAILABLE = False
-
-# RAG (opc.) — cargamos perezosamente
-try:
-    from langchain.embeddings import OpenAIEmbeddings
-    from langchain_community.vectorstores import FAISS
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
-    from langchain.chat_models import ChatOpenAI
+    from langchain_openai import ChatOpenAI
     from langchain.schema import HumanMessage, SystemMessage
     LANGCHAIN_AVAILABLE = True
 except Exception:
@@ -55,8 +47,6 @@ st.markdown(
     <style>
     .small-note { color: #64748b; font-size: 0.92em; }
     .metric-card { background: #0f172a10; border-radius: 12px; padding: 12px 16px; }
-    .ok { color: #059669; } .warn { color: #b45309; } .bad { color: #dc2626; }
-    .subtle { color: #6b7280; }
     .tight { line-height: 1.2; }
     </style>
     """,
@@ -71,7 +61,6 @@ class Config:
     RANDOM_STATE: int = 42
     PCA_COMPONENTS: int = 12
     TOP_K_RECS: int = 20
-    SHAP_SAMPLE: int = 250
 
 CFG = Config()
 np.random.seed(CFG.RANDOM_STATE)
@@ -212,29 +201,17 @@ class MarketValueModel:
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         return self.model.predict(X)
 
-def plot_shap(model: XGBRegressor, X: pd.DataFrame, sample: int = CFG.SHAP_SAMPLE):
-    """Gráfico SHAP (fallback: importancias de XGBoost)."""
-    if not SHAP_AVAILABLE:
-        fig, ax = plt.subplots(figsize=(8,5))
-        try:
-            importances = model.feature_importances_
-            idx = np.argsort(importances)[::-1][:25]
-            ax.barh(np.array(X.columns)[idx][::-1], np.array(importances)[idx][::-1])
-            ax.set_title("Importancia de características (XGBoost)")
-            st.pyplot(fig)
-        except Exception as e:
-            st.info(f"Importancias no disponibles: {e}")
-        return
+def plot_importances(model: XGBRegressor, X: pd.DataFrame, top_n: int = 25):
+    """Importancias de XGBoost (ligero, sin SHAP)."""
+    fig, ax = plt.subplots(figsize=(8,5))
     try:
-        import shap as shap_mod
-        idx = np.random.choice(X.index, size=min(sample, len(X)), replace=False)
-        explainer = shap_mod.TreeExplainer(model)
-        sv = explainer.shap_values(X.loc[idx])
-        fig, _ = plt.subplots(figsize=(8,5))
-        shap_mod.summary_plot(sv, X.loc[idx], plot_type="bar", show=False, color=None)
+        importances = model.feature_importances_
+        idx = np.argsort(importances)[::-1][:top_n]
+        ax.barh(np.array(X.columns)[idx][::-1], np.array(importances)[idx][::-1])
+        ax.set_title("Importancia de características (XGBoost)")
         st.pyplot(fig)
     except Exception as e:
-        st.info(f"SHAP no disponible: {e}")
+        st.info(f"Importancias no disponibles: {e}")
 
 # -------------------------
 # ClubFit (fit_score & ranking)
@@ -331,14 +308,13 @@ with st.sidebar:
 
     st.header("② Filtro timeframe")
     st.caption("Se aplica ANTES de entrenar el modelo y calcular encaje/ranking.")
-    # (Los controles se construyen en main tras ver columnas)
 
     st.header("③ RAG (opcional)")
     api_key = st.text_input("OPENAI_API_KEY", type="password", help="Pega tu clave para habilitar el chat contextual (no se guarda).")
 
     st.header("④ Parámetros")
     top_k = st.number_input("Top K (ranking)", min_value=5, max_value=200, value=CFG.TOP_K_RECS, step=1)
-    show_shap = st.checkbox("Mostrar SHAP / Importancias", value=True)
+    show_importances = st.checkbox("Mostrar importancias del modelo", value=True)
 
 st.title("⚽ Scouting Tool — Avanzada")
 
@@ -428,9 +404,9 @@ m1.markdown(f"<div class='metric-card tight'><b>CV MAE</b><br>{metrics['cv_mae']
 m2.markdown(f"<div class='metric-card tight'><b>Holdout MAE</b><br>{metrics['holdout_mae']:,.0f}</div>", unsafe_allow_html=True)
 m3.markdown(f"<div class='metric-card tight'><b>R²</b><br>{metrics['r2']:.3f}</div>", unsafe_allow_html=True)
 
-if show_shap:
+if show_importances:
     st.markdown("**Importancia de variables**")
-    plot_shap(model.model, X, sample=min(CFG.SHAP_SAMPLE, len(X)))
+    plot_importances(model.model, X, top_n=25)
 
 # Fit scorer
 fitter = ClubFit(df_pred, spaces)
@@ -497,9 +473,9 @@ with tab_rank:
                 st.error(str(e))
 
 with tab_rag:
-    st.subheader("Chat con RAG (opcional)")
+    st.subheader("Chat con RAG (TF-IDF, sin FAISS)")
     if not LANGCHAIN_AVAILABLE:
-        st.info("RAG deshabilitado: faltan dependencias de LangChain/FAISS. Revisa requirements.txt.")
+        st.info("RAG deshabilitado: falta langchain-openai. Revisa requirements.txt.")
     else:
         q_default = "Dame 5 posibles fichajes con alto fit y buen precio para {club}"
         question = st.text_input("Pregunta", value=q_default)
@@ -510,13 +486,14 @@ with tab_rag:
                 st.warning("Pega tu OPENAI_API_KEY en la barra lateral.")
             else:
                 try:
-                    # Construimos corpus contextual (agregando fit/signing si hay club)
                     os.environ["OPENAI_API_KEY"] = api_key
+                    # Construimos corpus contextual (agregando fit/signing si hay club)
                     df_ctx = df_pred.copy()
                     if club_for_ctx:
                         tmp = fitter.rank_signings(club_for_ctx, top_k=len(df_ctx))
                         if "Player" in df_ctx.columns:
                             df_ctx = df_ctx.merge(tmp[["Player","fit_score","signing_score"]], on="Player", how="left")
+                    # Textos para TF-IDF
                     docs = []
                     for _, r in df_ctx.iterrows():
                         lines = []
@@ -528,15 +505,15 @@ with tab_rag:
                         if CFG.TARGET in r:
                             lines.append(f"{CFG.TARGET}: {r.get(CFG.TARGET, np.nan)}")
                         docs.append("\n".join(lines))
-                    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=80)
-                    pieces = []
-                    for d in docs:
-                        pieces.extend(splitter.split_text(d))
-                    store = FAISS.from_texts(pieces, OpenAIEmbeddings())
-                    chat = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+                    # Retrieval TF-IDF
                     ctx_q = question.replace("{club}", club_for_ctx) if club_for_ctx else question
-                    sims = store.similarity_search(ctx_q, k=6)
-                    context_text = "\n\n---\n\n".join([s.page_content for s in sims])
+                    vect = TfidfVectorizer(max_features=30000, ngram_range=(1,2))
+                    Xtf = vect.fit_transform(docs + [ctx_q])
+                    sims = cosine_similarity(Xtf[-1], Xtf[:-1]).ravel()
+                    top_idx = np.argsort(sims)[::-1][:6]
+                    context_text = "\n\n---\n\n".join([docs[i] for i in top_idx])
+                    # Chat
+                    chat = ChatOpenAI(model="gpt-4o-mini", temperature=0)
                     msgs = [
                         SystemMessage(content="Eres analista de scouting. Responde con datos del contexto y recomendaciones accionables."),
                         HumanMessage(content=f"Contexto:\n{context_text}\n\nPregunta: {ctx_q}")
@@ -560,8 +537,8 @@ with tab_help:
           - Favorece **encaje** y **calidad esperada** (predicha), penaliza **costo** (valor de mercado).  
         - **rank_for_target**: puesto del jugador en el ranking del club destino (1 = mejor), **excluyendo** a los jugadores que ya están en el club en el timeframe.  
         - **Top K (a.k.a. K-Rank)**: cuántos candidatos visualizar/evaluar (no es métrica, es un parámetro de corte del ranking).  
-        - **SHAP / Importancias**: explica qué variables empujan más las predicciones. Si SHAP no está disponible, se muestran importancias del modelo.  
-        - **RAG**: chat que responde en base al **contenido real de tu dataset** (necesita OPENAI_API_KEY).  
+        - **Importancias**: se muestran las importancias del modelo (ligero y robusto en la nube).  
+        - **RAG**: chat que responde en base al **contenido real de tu dataset** usando TF-IDF (sin FAISS).  
         """.strip()
     )
     st.markdown(
@@ -575,4 +552,3 @@ with tab_help:
     )
 
 st.success("Listo. Carga archivos, filtra el timeframe y explora predicciones, encaje y ranking. 👌")
-
