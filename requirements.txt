@@ -7,11 +7,11 @@ xgboost==2.0.3
 scikit-learn==1.4.2
 openpyxl==3.1.5
 
-# LangChain compatible con tus imports (chat_models, embeddings) + vectorstores en community
+# LangChain en versión compatible con tus imports
 langchain==0.1.16
 langchain-community==0.0.34
 tiktoken==0.7.0
 openai==1.37.0
 
-# Vector store que usas en el código
+# FAISS (vector store que usa tu app)
 faiss-cpu==1.8.0.post1
