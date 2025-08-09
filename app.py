@@ -2,15 +2,15 @@
 # ===============================================================
 # ⚽ SCOUTING TOOL — Streamlit (multi-archivo, timeframe, ML, fit, ranking, RAG)
 # ===============================================================
-# Funciones clave:
 # - Carga de 1+ archivos (XLSX/CSV) con autodetección de hoja (XLSX)
 # - Filtro por timeframe (fecha / temporada)
-# - Modelo ML (XGBoost) de valor de mercado + métricas CV/holdout
+# - Modelo ML (XGBoost) para "Market value" + métricas CV/Holdout
 # - Perfil de club por posición (PCA) y fit_score jugador→club (0–1)
-# - Ranking de mejores incorporaciones EXCLUYENDO jugadores del club destino
-# - RAG opcional (chat) con TF-IDF + ChatOpenAI (sin FAISS, compatible Py 3.13)
-# - Valores monetarios redondeados a millones (solo en display)
+# - Ranking de incorporaciones EXCLUYENDO jugadores del club destino
+# - RAG (chat) con TF-IDF + ChatOpenAI (sin FAISS; compatible Py 3.13)
+# - Valores monetarios redondeados a millones (display)
 # - Descarga de CSVs y glosario detallado
+# - Uso seguro de OPENAI_API_KEY: st.secrets / env var / input
 # ===============================================================
 
 import os
@@ -30,7 +30,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from xgboost import XGBRegressor
 
-# RAG (chat)
+# RAG (chat) con OpenAI
 try:
     from langchain_openai import ChatOpenAI
     from langchain.schema import HumanMessage, SystemMessage
@@ -41,13 +41,15 @@ except Exception:
 # -------------------------
 # Config & estilo
 # -------------------------
-st.set_page_config(page_title="Scouting Tool", layout="wide")
+st.set_page_config(page_title="⚽ Scouting Tool", layout="wide", page_icon="⚽")
 st.markdown(
     """
     <style>
-    .small-note { color: #64748b; font-size: 0.92em; }
-    .metric-card { background: #0f172a10; border-radius: 12px; padding: 12px 16px; }
-    .tight { line-height: 1.2; }
+      .small-note { color: #64748b; font-size: 0.92em; }
+      .metric-card { background: #0f172a10; border-radius: 12px; padding: 12px 16px; }
+      .tight { line-height: 1.2; }
+      .pill { display:inline-block; padding:2px 8px; border-radius:999px; background:#0ea5e91a; color:#0369a1; font-size:12px; }
+      .ok { color:#059669 } .warn { color:#b45309 } .bad { color:#dc2626 }
     </style>
     """,
     unsafe_allow_html=True
@@ -78,7 +80,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def format_millions(v):
-    """Formatea números a millones para mostrar (3.45 M)."""
+    """Formatea números a millones (3.45 M)."""
     try:
         return f"{float(v)/1_000_000:.2f} M"
     except Exception:
@@ -112,7 +114,7 @@ def auto_pick_sheet(xls: pd.ExcelFile, filename: str, required={"Player","Team",
 
 @st.cache_data(show_spinner=False)
 def read_any(file_bytes, filename: str, sheet_hint: Optional[str]) -> pd.DataFrame:
-    """Lee XLSX/CSV, autodetecta hoja si es necesario, normaliza columnas, añade columnas __source_*."""
+    """Lee XLSX/CSV, autodetecta hoja si es necesario, normaliza columnas, añade __source_*."""
     if filename.lower().endswith(".xlsx"):
         xls = pd.ExcelFile(file_bytes)
         chosen = sheet_hint or auto_pick_sheet(xls, filename)
@@ -156,7 +158,7 @@ def apply_timeframe(df: pd.DataFrame,
     return out.reset_index(drop=True)
 
 def select_numeric(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, List[str]]:
-    """Valida TARGET, filtra NAs, prepara X numéricas y y."""
+    """Valida TARGET, filtra NAs, prepara X e y (numérico)."""
     if CFG.TARGET not in df.columns:
         raise ValueError(f"No se encontró la columna objetivo '{CFG.TARGET}'.")
     df2 = df[df[CFG.TARGET].notna()].copy()
@@ -183,7 +185,7 @@ class LatentSpaces:
 class MarketValueModel:
     def __init__(self):
         self.model = XGBRegressor(
-            n_estimators=700, learning_rate=0.06, max_depth=8,
+            n_estimators=750, learning_rate=0.06, max_depth=8,
             subsample=0.85, colsample_bytree=0.85, reg_lambda=2.0,
             random_state=CFG.RANDOM_STATE
         )
@@ -193,11 +195,9 @@ class MarketValueModel:
         Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, random_state=CFG.RANDOM_STATE)
         self.model.fit(Xtr, ytr)
         y_pred = self.model.predict(Xte)
-        return {
-            "cv_mae": float(cv_mae),
-            "holdout_mae": float(mean_absolute_error(yte, y_pred)),
-            "r2": float(r2_score(yte, y_pred))
-        }
+        return {"cv_mae": float(cv_mae),
+                "holdout_mae": float(mean_absolute_error(yte, y_pred)),
+                "r2": float(r2_score(yte, y_pred))}
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         return self.model.predict(X)
 
@@ -218,11 +218,11 @@ def plot_importances(model: XGBRegressor, X: pd.DataFrame, top_n: int = 25):
 # -------------------------
 class ClubFit:
     """
-    Fit-score: similitud coseno entre vector PCA del jugador y centroides del club destino
+    Fit-score: similitud coseno entre el vector PCA del jugador y los centroides del club destino
     por cada posición del jugador, calculados DENTRO del timeframe seleccionado.
     signing_score = 0.55*fit + 0.35*z(predicted_value) - 0.10*z(Market value)
-    rank_for_target: ranking (1 = mejor) del jugador para ese club,
-    EXCLUYENDO jugadores que ya pertenecen al club destino en el periodo seleccionado.
+    rank_for_target: puesto del jugador en el ranking del club (1 = mejor),
+    EXCLUYENDO jugadores del club destino en el periodo seleccionado.
     """
     def __init__(self, df_full: pd.DataFrame, spaces: Dict[str, pd.DataFrame]):
         self.df = df_full.copy()
@@ -279,7 +279,7 @@ class ClubFit:
 
     def rank_signings(self, target_club: str, top_k: int = CFG.TOP_K_RECS) -> pd.DataFrame:
         df = self._with_scores(target_club)
-        df = df[df["Team"] != target_club]  # EXCLUIR jugadores ya pertenecientes al club destino
+        df = df[df["Team"] != target_club]  # excluir jugadores del club destino
         cols = ["Player","Team","Position","Age",CFG.TARGET,"predicted_value","fit_score","signing_score"]
         cols = [c for c in cols if c in df.columns]
         return df.sort_values("signing_score", ascending=False).head(top_k)[cols]
@@ -299,24 +299,27 @@ class ClubFit:
         return out
 
 # -------------------------
-# Sidebar
+# Sidebar (inputs)
 # -------------------------
 with st.sidebar:
     st.header("① Carga de archivos")
-    uploaded_files = st.file_uploader("Sube uno o varios archivos (.xlsx / .csv)", type=["xlsx","csv"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader("Sube uno o varios (.xlsx / .csv)", type=["xlsx","csv"], accept_multiple_files=True)
     sheet_hint = st.text_input("Nombre de hoja (opcional, sólo Excel)")
 
     st.header("② Filtro timeframe")
     st.caption("Se aplica ANTES de entrenar el modelo y calcular encaje/ranking.")
 
-    st.header("③ RAG (opcional)")
-    api_key = st.text_input("OPENAI_API_KEY", type="password", help="Pega tu clave para habilitar el chat contextual (no se guarda).")
+    st.header("③ Clave OpenAI (RAG)")
+    # Prioriza secrets / env var; si no existen, permite pegarla
+    default_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+    api_key = st.text_input("OPENAI_API_KEY", type="password", value=default_key, help="Usa Secrets en producción; aquí puedes pegarla temporalmente.")
 
     st.header("④ Parámetros")
     top_k = st.number_input("Top K (ranking)", min_value=5, max_value=200, value=CFG.TOP_K_RECS, step=1)
     show_importances = st.checkbox("Mostrar importancias del modelo", value=True)
 
 st.title("⚽ Scouting Tool — Avanzada")
+st.caption("Multi-archivo · Timeframe · ML · Fit por club · Ranking · RAG")
 
 if not uploaded_files:
     st.info("Sube al menos un archivo para comenzar.")
@@ -366,7 +369,7 @@ with col2:
         seasons_selected = st.multiselect("Temporadas / Años", options=uniq, default=uniq)
         season_col = chosen_season_col
 
-st.caption("Todo se calculará **sólo** con datos dentro del timeframe elegido (Team within selected timeframe).")
+st.caption("Todo se calcula **sólo** con datos dentro del timeframe elegido (Team within selected timeframe).")
 
 # -------------------------
 # Aplicar timeframe y preparar datos
@@ -473,7 +476,7 @@ with tab_rank:
                 st.error(str(e))
 
 with tab_rag:
-    st.subheader("Chat con RAG (TF-IDF, sin FAISS)")
+    st.subheader("Chat con RAG (TF-IDF, OpenAI)")
     if not LANGCHAIN_AVAILABLE:
         st.info("RAG deshabilitado: falta langchain-openai. Revisa requirements.txt.")
     else:
@@ -483,7 +486,7 @@ with tab_rag:
         club_for_ctx = st.selectbox("Club para enriquecer contexto (opcional)", options=clubs) if clubs else ""
         if st.button("Preguntar"):
             if not api_key:
-                st.warning("Pega tu OPENAI_API_KEY en la barra lateral.")
+                st.warning("Pega tu OPENAI_API_KEY en la barra lateral o define st.secrets/ENV.")
             else:
                 try:
                     os.environ["OPENAI_API_KEY"] = api_key
@@ -524,30 +527,18 @@ with tab_rag:
                     st.error(f"RAG error: {e}")
 
 with tab_help:
-    st.subheader("Glosario y criterios (lee esto antes de decidir)")
+    st.subheader("Glosario y criterios")
     st.markdown(
         """
         - **Team within selected timeframe**: todo se calcula usando sólo registros que caen en tu **rango de fechas** y/o **temporadas** seleccionadas.  
         - **Market value**: valor de mercado real (del dataset).  
         - **predicted_value**: valor estimado por el modelo (XGBoost) entrenado con variables numéricas del timeframe.  
-        - **delta_pred_real**: diferencia `predicted_value - Market value`.  
-          - Positivo → el modelo cree que el jugador está **infravalorado**; Negativo → **sobrevalorado**.  
-        - **fit_score (0–1)**: similitud del vector PCA del jugador con el **perfil** del club destino en sus posiciones (centroides por posición).  
-        - **signing_score**: métrica final de priorización = `0.55*fit + 0.35*z(predicted_value) - 0.10*z(Market value)`.  
-          - Favorece **encaje** y **calidad esperada** (predicha), penaliza **costo** (valor de mercado).  
-        - **rank_for_target**: puesto del jugador en el ranking del club destino (1 = mejor), **excluyendo** a los jugadores que ya están en el club en el timeframe.  
-        - **Top K (a.k.a. K-Rank)**: cuántos candidatos visualizar/evaluar (no es métrica, es un parámetro de corte del ranking).  
-        - **Importancias**: se muestran las importancias del modelo (ligero y robusto en la nube).  
-        - **RAG**: chat que responde en base al **contenido real de tu dataset** usando TF-IDF (sin FAISS).  
-        """.strip()
-    )
-    st.markdown(
-        """
-        **Buenas prácticas**  
-        - Asegúrate de que las columnas clave existan y estén limpias: `Player`, `Team`, `Position`, `Market value`.  
-        - Si tienes métricas por 90' (xG/xA/intercepciones/duelos), el modelo y el fit-score suelen mejorar.  
-        - Sube varias temporadas/ventanas y usa el timeframe para definir comparables justos.  
-        - Revisa siempre el **delta_pred_real** y el **fit_score** antes de decidir una incorporación.  
+        - **delta_pred_real**: `predicted_value - Market value` (positivo → posible infravaloración).  
+        - **fit_score (0–1)**: similitud del vector PCA del jugador con el perfil del club destino en sus posiciones (centroides por posición).  
+        - **signing_score**: `0.55*fit + 0.35*z(predicted_value) - 0.10*z(Market value)`; favorece encaje y proyección, penaliza costo actual.  
+        - **rank_for_target**: puesto del jugador en el ranking del club (1 = mejor), **excluyendo** jugadores ya pertenecientes al club destino.  
+        - **Top K**: número de candidatos a mostrar (no es métrica).  
+        - **RAG**: chat que responde con base en el contenido de tu dataset usando TF-IDF + OpenAI.  
         """.strip()
     )
 
