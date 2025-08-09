@@ -1,15 +1,12 @@
-# requirements.txt
-streamlit==1.36.0
-pandas==2.2.2
-numpy==1.26.4
-matplotlib==3.8.4
-seaborn==0.13.2
-xgboost==2.0.3
-scikit-learn==1.4.2
-openpyxl==3.1.5
-
-# RAG (sin FAISS, compatible Py 3.13)
-langchain==0.2.16
-langchain-community==0.2.16
-langchain-openai==0.1.21
-tiktoken==0.7.0
+streamlit
+pandas>=2.2.3
+numpy>=2.1
+matplotlib
+seaborn
+scikit-learn>=1.6
+xgboost>=2.1.1
+openpyxl
+langchain>=0.2.16
+langchain-community>=0.2.16
+langchain-openai>=0.1.21
+tiktoken
