@@ -231,40 +231,47 @@ class MarketValueModel:
             random_state=CFG.RANDOM_STATE
         )
     def train(self, X: pd.DataFrame, y: pd.Series) -> Dict[str, float]:
-        
+        """
+        Entrena con holdout + early stopping.
+        Si la versión de XGBoost lanza TypeError, reintenta sin early-stopping.
+        """
         # Holdout
         Xtr, Xte, ytr, yte = train_test_split(
             X, y, test_size=0.2, random_state=CFG.RANDOM_STATE
         )
     
-        # Convertir a numpy "duro" (float64) para evitar tipos Pandas/nullable
-        Xtr_np = np.asarray(Xtr, dtype=np.float64)
-        Xte_np = np.asarray(Xte, dtype=np.float64)
-        ytr_np = np.asarray(ytr, dtype=np.float64)
-        yte_np = np.asarray(yte, dtype=np.float64)
+        # Conversión robusta: float32, C-contiguo, y 1D en y
+        Xtr_np = np.ascontiguousarray(np.asarray(Xtr, dtype=np.float32))
+        Xte_np = np.ascontiguousarray(np.asarray(Xte, dtype=np.float32))
+        ytr_np = np.ascontiguousarray(np.asarray(ytr, dtype=np.float32)).ravel()
+        yte_np = np.ascontiguousarray(np.asarray(yte, dtype=np.float32)).ravel()
     
-        # Seguridad extra: comprobar NaN/Inf
+        # Checks duros
         if (np.isnan(Xtr_np).any() or np.isnan(Xte_np).any() or
             np.isnan(ytr_np).any() or np.isnan(yte_np).any()):
             raise ValueError("Hay NaN en X o y tras preprocesar; revisa el dataset o el filtro de timeframe.")
         if (np.isinf(Xtr_np).any() or np.isinf(Xte_np).any()):
             raise ValueError("Hay valores Inf en X tras preprocesar.")
     
-        # Entrenamiento con early stopping
-        self.model.fit(
-            Xtr_np, ytr_np,
-            eval_set=[(Xte_np, yte_np)],
-            eval_metric="mae",
-            verbose=False,
-            early_stopping_rounds=50
-        )
+        # Entrenamiento con early stopping (intento 1)
+        try:
+            self.model.fit(
+                Xtr_np, ytr_np,
+                eval_set=[(Xte_np, yte_np)],
+                eval_metric="mae",
+                verbose=False,
+                early_stopping_rounds=50
+            )
+        except TypeError:
+            # Fallback: sin early-stopping ni eval_set (máxima compatibilidad)
+            self.model.fit(Xtr_np, ytr_np)
     
         # Métricas en holdout
         y_pred = self.model.predict(Xte_np)
         holdout_mae = float(mean_absolute_error(yte_np, y_pred))
         r2 = float(r2_score(yte_np, y_pred))
     
-        # Mini-CV (opcional) para estimar CV MAE sin "congelar" la app
+        # Mini-CV (sólo si NO es fast_mode)
         if getattr(self, "fast_mode", True):
             cv_mae = float("nan")
         else:
@@ -272,32 +279,34 @@ class MarketValueModel:
             if n < len(X):
                 rng = np.random.default_rng(CFG.RANDOM_STATE)
                 idx = rng.choice(len(X), size=n, replace=False)
-                X_cv = X.iloc[idx].astype(np.float64)
-                y_cv = y.iloc[idx].astype(np.float64)
+                X_cv = np.ascontiguousarray(X.iloc[idx].to_numpy(dtype=np.float32))
+                y_cv = np.ascontiguousarray(y.iloc[idx].to_numpy(dtype=np.float32)).ravel()
             else:
-                X_cv = X.astype(np.float64)
-                y_cv = y.astype(np.float64)
+                X_cv = np.ascontiguousarray(X.to_numpy(dtype=np.float32))
+                y_cv = np.ascontiguousarray(y.to_numpy(dtype=np.float32)).ravel()
     
             kf = KFold(n_splits=3, shuffle=True, random_state=CFG.RANDOM_STATE)
-            # Nota: para que no reentrene con early stopping en cada fold, usamos self.model.get_xgb_params()
-            # y creamos un modelo "clonado" por fold con los mismos hiperparámetros.
             scores = []
             for tr_idx, te_idx in kf.split(X_cv):
-                Xtr_k, Xte_k = X_cv.iloc[tr_idx].to_numpy(dtype=np.float64), X_cv.iloc[te_idx].to_numpy(dtype=np.float64)
-                ytr_k, yte_k = y_cv.iloc[tr_idx].to_numpy(dtype=np.float64), y_cv.iloc[te_idx].to_numpy(dtype=np.float64)
                 mdl = XGBRegressor(**self.model.get_xgb_params())
-                mdl.fit(
-                    Xtr_k, ytr_k,
-                    eval_set=[(Xte_k, yte_k)],
-                    eval_metric="mae",
-                    verbose=False,
-                    early_stopping_rounds=30
-                )
+                Xtr_k, Xte_k = X_cv[tr_idx], X_cv[te_idx]
+                ytr_k, yte_k = y_cv[tr_idx], y_cv[te_idx]
+                try:
+                    mdl.fit(
+                        Xtr_k, ytr_k,
+                        eval_set=[(Xte_k, yte_k)],
+                        eval_metric="mae",
+                        verbose=False,
+                        early_stopping_rounds=30
+                    )
+                except TypeError:
+                    mdl.fit(Xtr_k, ytr_k)
                 yhat_k = mdl.predict(Xte_k)
                 scores.append(mean_absolute_error(yte_k, yhat_k))
             cv_mae = float(np.mean(scores)) if scores else float("nan")
     
         return {"cv_mae": cv_mae, "holdout_mae": holdout_mae, "r2": r2}
+
 
 
 def plot_importances(model: XGBRegressor, X: pd.DataFrame, top_n: int = 25):
