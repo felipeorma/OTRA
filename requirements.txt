@@ -10,3 +10,4 @@ langchain>=0.2.16
 langchain-community>=0.2.16
 langchain-openai>=0.1.21
 tiktoken
+soccerplots==1.0.7
