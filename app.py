@@ -622,7 +622,7 @@ df_pred = df_for_model.copy()
 df_pred["predicted_value"] = y_hat
 df_pred["delta_pred_real"] = df_pred["predicted_value"] - df_pred[CFG.TARGET]
 
-# ---- asegurar _GroupPos globalmente (siempre disponible y en formato lista) ----
+# ---- asegurar _GroupPos globalmente ----
 if "_GroupPos" not in df_pred.columns:
     pos_series = df_pred.get(CFG.POS_COL, pd.Series([""] * len(df_pred), index=df_pred.index))
     df_pred["_GroupPos"] = pos_series.apply(normalize_pos_to_group)
@@ -778,15 +778,46 @@ with tab_impact:
         except Exception:
             return cols[:8]
 
+    # ====== CORRECCIÓN: Radar() sin params/low/high en el constructor + saneo defensivo ======
     def radar_and_title(player_label: str, club_label: str, grp: str, values_player, values_centroid, ranges, params):
         if not SOCCERPLOTS_AVAILABLE:
             st.info("Instala `soccerplots` para ver radar y plot_text.")
             return
-        radar = Radar(params=params, low=[r[0] for r in ranges], high=[r[1] for r in ranges], round_int=[False]*len(params))
+
+        # Asegurar coherencia de longitudes y evitar NaNs / rangos degenerados
+        params = list(params)
+        n = len(params)
+
+        # recortar/transformar rangos
+        ranges_fixed = []
+        for i in range(n):
+            try:
+                lo, hi = ranges[i]
+            except Exception:
+                lo, hi = 0.0, 1.0
+            lo = 0.0 if pd.isna(lo) else float(lo)
+            hi = 1.0 if pd.isna(hi) else float(hi)
+            if hi == lo:
+                eps = 1.0 if hi == 0.0 else abs(hi) * 0.05
+                lo, hi = lo - eps, hi + eps
+            ranges_fixed.append((lo, hi))
+
+        vp = np.array(values_player, dtype=float)
+        vc = np.array(values_centroid, dtype=float)
+        if len(vp) != n:
+            vp = np.resize(vp, n)
+        if len(vc) != n:
+            vc = np.resize(vc, n)
+        vp = np.nan_to_num(vp, nan=0.0)
+        vc = np.nan_to_num(vc, nan=0.0)
+
+        # Constructor simple; los rangos/params van en plot_radar
+        radar = Radar()
         fig, ax = radar.plot_radar(
-            ranges=ranges, params=params, values=[values_player, values_centroid],
+            ranges=ranges_fixed, params=params, values=[vp.tolist(), vc.tolist()],
             radar_color=['#10b981', '#3b82f6'], alphas=[0.65, 0.45],
-            title=dict(title_name=player_label, title_color='white', subtitle=f"vs. perfil {grp} de {club_label}", subtitle_color='#94a3b8'),
+            title=dict(title_name=player_label, title_color='white',
+                       subtitle=f"vs. perfil {grp} de {club_label}", subtitle_color='#94a3b8'),
             compare=True
         )
         try:
@@ -797,6 +828,7 @@ with tab_impact:
         except Exception:
             pass
         st.pyplot(fig, use_container_width=True)
+    # ====== /CORRECCIÓN ======
 
     if st.button("Simular impacto", key="btn_impact"):
         if player_sel is None:
@@ -823,7 +855,6 @@ with tab_impact:
                     features = pick_radar_features(list(X.columns))
                     base = df_pred.loc[:, features].apply(pd.to_numeric, errors="coerce").fillna(0.0)
                     ranges = list(zip(base.min().tolist(), base.max().tolist()))
-                    # ---- mask_grp robusto (1/2) ----
                     has_grp = df_pred["_GroupPos"].apply(lambda lst: (grp in lst) if isinstance(lst, (list, tuple, set)) else False)
                     mask_grp = (df_pred["Team"] == club_target_imp) & has_grp
                     centroid_vals = df_pred.loc[mask_grp, features].apply(pd.to_numeric, errors="coerce").fillna(0.0).mean().to_numpy()
@@ -859,7 +890,6 @@ with tab_impact:
                         features = pick_radar_features(list(X.columns))
                         base = df_pred.loc[:, features].apply(pd.to_numeric, errors="coerce").fillna(0.0)
                         ranges = list(zip(base.min().tolist(), base.max().tolist()))
-                        # ---- mask_grp robusto (2/2) ----
                         has_grp = df_pred["_GroupPos"].apply(lambda lst: (grp in lst) if isinstance(lst, (list, tuple, set)) else False)
                         mask_grp = (df_pred["Team"] == club_target_imp) & has_grp
                         centroid_vals = df_pred.loc[mask_grp, features].apply(pd.to_numeric, errors="coerce").fillna(0.0).mean().to_numpy()
