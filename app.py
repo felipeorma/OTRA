@@ -500,7 +500,9 @@ def train_pipeline(df_in: pd.DataFrame, X: pd.DataFrame, y: pd.Series, fast_mode
 
     status.info("Generando predicciones…")
     prog.progress(80)
-    y_hat = model.predict(X)
+    # Predicción robusta: usa el estimador interno y numpy float32 C-contiguo
+    X_np_all = np.ascontiguousarray(X.to_numpy(dtype=np.float32))
+    y_hat = model.model.predict(X_np_all)
 
     status.info("Calculando espacios latentes (PCA)…")
     spaces = LatentSpaces().fit_transform(X)
@@ -508,6 +510,7 @@ def train_pipeline(df_in: pd.DataFrame, X: pd.DataFrame, y: pd.Series, fast_mode
     status.success("Entrenamiento finalizado.")
 
     return model, metrics, y_hat, spaces
+
 
 st.subheader("Entrenamiento del modelo (dentro del timeframe)")
 model, metrics, y_hat, spaces = train_pipeline(df_for_model, X, y, fast_mode)
