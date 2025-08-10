@@ -1,13 +1,9 @@
-# ✅ Versiones con wheels para Python 3.12 (evita builds lentos)
-streamlit==1.36.0
-pandas==2.2.2
-numpy==1.26.4
-scikit-learn==1.4.2
-xgboost==2.0.3
-matplotlib==3.8.4
-
-# RAG (opcional en la app; no rompe si no se usa)
-langchain-openai==0.1.8
-
-# Radar y títulos (opcional, tu app ya hace fallback si falta)
-soccerplots==1.0.6
+streamlit
+pandas
+numpy
+scikit-learn
+xgboost
+matplotlib
+openpyxl
+langchain-openai
+git+https://github.com/Slothfulwave612/soccerplots@master
