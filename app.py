@@ -622,6 +622,15 @@ df_pred = df_for_model.copy()
 df_pred["predicted_value"] = y_hat
 df_pred["delta_pred_real"] = df_pred["predicted_value"] - df_pred[CFG.TARGET]
 
+# ---- asegurar _GroupPos globalmente (siempre disponible y en formato lista) ----
+if "_GroupPos" not in df_pred.columns:
+    pos_series = df_pred.get(CFG.POS_COL, pd.Series([""] * len(df_pred), index=df_pred.index))
+    df_pred["_GroupPos"] = pos_series.apply(normalize_pos_to_group)
+else:
+    df_pred["_GroupPos"] = df_pred["_GroupPos"].apply(
+        lambda v: v if isinstance(v, (list, tuple, set)) else normalize_pos_to_group(v)
+    )
+
 # Métricas (tarjetas)
 m1, m2, m3 = st.columns(3)
 m1.markdown(f"<div class='metric-card tight chalk'><b>CV MAE</b><br>{'—' if np.isnan(metrics['cv_mae']) else f'{metrics['cv_mae']:,.0f}'}</div>", unsafe_allow_html=True)
@@ -666,7 +675,6 @@ with tab_fit:
         if st.button("Evaluar encaje", key="btn_fit_eval"):
             try:
                 res = fitter.rank_signings(target_club, top_k=len(df_pred))
-                df_pred["_GroupPos"] = df_pred.get("_GroupPos", df_pred.get(CFG.POS_COL, "").apply(normalize_pos_to_group))
                 out = fitter.eval_player_in_club(player_name, target_club)
                 st.dataframe(display_money(out), use_container_width=True)
                 st.markdown(
@@ -815,7 +823,9 @@ with tab_impact:
                     features = pick_radar_features(list(X.columns))
                     base = df_pred.loc[:, features].apply(pd.to_numeric, errors="coerce").fillna(0.0)
                     ranges = list(zip(base.min().tolist(), base.max().tolist()))
-                    mask_grp = (df_pred["Team"] == club_target_imp) & (df_pred["_GroupPos"].apply(lambda lst: grp in lst if isinstance(lst, list) else False))
+                    # ---- mask_grp robusto (1/2) ----
+                    has_grp = df_pred["_GroupPos"].apply(lambda lst: (grp in lst) if isinstance(lst, (list, tuple, set)) else False)
+                    mask_grp = (df_pred["Team"] == club_target_imp) & has_grp
                     centroid_vals = df_pred.loc[mask_grp, features].apply(pd.to_numeric, errors="coerce").fillna(0.0).mean().to_numpy()
                     player_vals = df_pred.loc[idx, features].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy()
                     radar_and_title(player_sel, club_target_imp, grp, player_vals, centroid_vals, ranges, features)
@@ -849,7 +859,9 @@ with tab_impact:
                         features = pick_radar_features(list(X.columns))
                         base = df_pred.loc[:, features].apply(pd.to_numeric, errors="coerce").fillna(0.0)
                         ranges = list(zip(base.min().tolist(), base.max().tolist()))
-                        mask_grp = (df_pred["Team"] == club_target_imp) & (df_pred["_GroupPos"].apply(lambda lst: grp in lst if isinstance(lst, list) else False))
+                        # ---- mask_grp robusto (2/2) ----
+                        has_grp = df_pred["_GroupPos"].apply(lambda lst: (grp in lst) if isinstance(lst, (list, tuple, set)) else False)
+                        mask_grp = (df_pred["Team"] == club_target_imp) & has_grp
                         centroid_vals = df_pred.loc[mask_grp, features].apply(pd.to_numeric, errors="coerce").fillna(0.0).mean().to_numpy()
                         v = []
                         for c in features:
