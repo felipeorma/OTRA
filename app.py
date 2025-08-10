@@ -41,12 +41,10 @@ except Exception:
 # ---- Soccerplots (Radar + plot_text) ----
 try:
     from soccerplots.radar_chart import Radar
-    # El módulo de documentación expone plot_text; algunas versiones lo exponen así:
     try:
-        from soccerplots.plot_text import plot_text  # docs path
+        from soccerplots.plot_text import plot_text  # según docs
     except Exception:
-        # fallback: versiones que exponen utilidades en utils
-        from soccerplots.utils import plot_text  # type: ignore
+        from soccerplots.utils import plot_text  # fallback
     SOCCERPLOTS_AVAILABLE = True
 except Exception:
     SOCCERPLOTS_AVAILABLE = False
@@ -97,7 +95,7 @@ CFG = Config()
 np.random.seed(CFG.RANDOM_STATE)
 
 # ===============================================================
-# Normalización de posiciones (tu diccionario) + Vecindarios
+# Normalización de posiciones (diccionario) + Vecindarios
 # ===============================================================
 RAW_TO_GROUP = {
   'GK': 'Goalkeeper',
@@ -783,7 +781,6 @@ with tab_impact:
             title=dict(title_name=player_label, title_color='white', subtitle=f"vs. perfil {grp} de {club_label}", subtitle_color='#94a3b8'),
             compare=True
         )
-        # plot_text para “rotular” con estilo (si está disponible)
         try:
             if plot_text is not None:
                 plot_text(ax=fig.axes[0], x=0.5, y=1.08,
@@ -818,7 +815,6 @@ with tab_impact:
                     features = pick_radar_features(list(X.columns))
                     base = df_pred.loc[:, features].apply(pd.to_numeric, errors="coerce").fillna(0.0)
                     ranges = list(zip(base.min().tolist(), base.max().tolist()))
-                    # centroide del grupo (en espacio original → usar media de las features)
                     mask_grp = (df_pred["Team"] == club_target_imp) & (df_pred["_GroupPos"].apply(lambda lst: grp in lst if isinstance(lst, list) else False))
                     centroid_vals = df_pred.loc[mask_grp, features].apply(pd.to_numeric, errors="coerce").fillna(0.0).mean().to_numpy()
                     player_vals = df_pred.loc[idx, features].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy()
@@ -853,10 +849,8 @@ with tab_impact:
                         features = pick_radar_features(list(X.columns))
                         base = df_pred.loc[:, features].apply(pd.to_numeric, errors="coerce").fillna(0.0)
                         ranges = list(zip(base.min().tolist(), base.max().tolist()))
-                        # centroide del grupo
                         mask_grp = (df_pred["Team"] == club_target_imp) & (df_pred["_GroupPos"].apply(lambda lst: grp in lst if isinstance(lst, list) else False))
                         centroid_vals = df_pred.loc[mask_grp, features].apply(pd.to_numeric, errors="coerce").fillna(0.0).mean().to_numpy()
-                        # valores jugador externo (si no hay columna → 0)
                         v = []
                         for c in features:
                             try:
