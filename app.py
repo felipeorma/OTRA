@@ -79,6 +79,32 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# ===== Theme colors (Streamlit) =====
+def _get_opt(name, default):
+    try:
+        v = st.get_option(name)
+        return v if v else default
+    except Exception:
+        return default
+
+THEME_PRIMARY = _get_opt("theme.primaryColor", "#F63366")
+THEME_TEXT = _get_opt("theme.textColor", "#FFFFFF")
+THEME_BG = _get_opt("theme.backgroundColor", "#0E1117")
+THEME_SBG = _get_opt("theme.secondaryBackgroundColor", "#262730")
+
+def _adjust_brightness(hex_color: str, factor: float = 0.8) -> str:
+    """factor<1 oscurece, >1 aclara"""
+    hex_color = hex_color.lstrip("#")
+    r = int(hex_color[0:2], 16)
+    g = int(hex_color[2:4], 16)
+    b = int(hex_color[4:6], 16)
+    r = max(0, min(255, int(r * factor)))
+    g = max(0, min(255, int(g * factor)))
+    b = max(0, min(255, int(b * factor)))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+THEME_PRIMARY_DARK = _adjust_brightness(THEME_PRIMARY, 0.75)
+
 # ===============================================================
 # Config
 # ===============================================================
@@ -314,15 +340,16 @@ class MarketValueModel:
         return {"cv_mae": cv_mae, "holdout_mae": holdout_mae, "r2": r2}
 
 def nice_barh(ax, labels, values, title=None):
-    """Barra horizontal moderna con tema chalkboard."""
-    ax.barh(labels, values, color='#94a3b8', edgecolor='white', alpha=0.9, linewidth=1.2)
-    ax.grid(True, axis='x', linestyle='--', alpha=0.35)
+    """Barra horizontal moderna con colores del tema Streamlit."""
+    ax.barh(labels, values, color=THEME_PRIMARY, edgecolor=THEME_TEXT, alpha=0.95, linewidth=1.2)
+    ax.grid(True, axis='x', linestyle='--', alpha=0.35, color=THEME_TEXT)
     ax.invert_yaxis()
     if title:
-        ax.set_title(title, fontsize=16, pad=10)
-    ax.tick_params(colors='white')
+        ax.set_title(title, fontsize=16, pad=10, color=THEME_TEXT)
+    ax.tick_params(colors=THEME_TEXT)
     for spine in ax.spines.values():
-        spine.set_color('white')
+        spine.set_color(THEME_TEXT)
+    ax.set_facecolor(THEME_BG)
 
 def plot_importances(model: XGBRegressor, X: pd.DataFrame, top_n: int = 25):
     try:
@@ -530,6 +557,15 @@ with st.sidebar:
     top_k = st.number_input("Top K (ranking)", min_value=5, max_value=200, value=CFG.TOP_K_RECS, step=1, key="topk_rank")
     show_importances = st.checkbox("Mostrar importancias del modelo", value=True, key="show_imps")
 
+    # ===== ⑤ Filtros de datos =====
+    st.header("⑤ Filtros de datos")
+    st.caption("Si existe columna de minutos, filtraremos por % mínimo respecto al máximo del dataset.")
+    min_pct_minutes = st.slider("Mínimo % de minutos (dataset)", min_value=0, max_value=100, value=30, step=5, key="min_pct_minutes") / 100.0
+
+    st.caption("Rango de edad (si hay columna 'Age' en el dataset).")
+    age_min_ui = st.number_input("Edad mínima", min_value=0, max_value=60, value=16, step=1, key="age_min_ui")
+    age_max_ui = st.number_input("Edad máxima", min_value=0, max_value=60, value=40, step=1, key="age_max_ui")
+
 st.title("⚽ Scouting Tool — Avanzada (Chalkboard theme)")
 
 if not uploaded_files:
@@ -590,6 +626,40 @@ if df_f.empty:
     st.warning("El filtro de timeframe dejó el dataset vacío. Ajusta los filtros.")
     st.stop()
 
+# ===== Aplicar filtros de minutos y edad (sidebar) =====
+# Ajustar sliders de edad a min/max reales si existe 'Age'
+if "Age" in df_f.columns:
+    try:
+        ages = pd.to_numeric(df_f["Age"], errors="coerce")
+        amin, amax = int(np.nanmin(ages)), int(np.nanmax(ages))
+        # Corregir valores fuera de rango si el usuario dejó defaults
+        age_min = max(st.session_state.get("age_min_ui", amin), amin)
+        age_max = min(st.session_state.get("age_max_ui", amax), amax)
+        if age_min > age_max:
+            age_min, age_max = amin, amax
+        df_f = df_f[(ages >= age_min) & (ages <= age_max)]
+    except Exception:
+        pass
+
+# Filtro por % de minutos (respecto al máximo del dataset)
+from math import isfinite
+mins_col = _pick_minutes_column(df_f)
+if mins_col and mins_col in df_f.columns:
+    try:
+        mins_vals = pd.to_numeric(df_f[mins_col], errors="coerce").fillna(0.0)
+        max_m = float(np.nanmax(mins_vals)) if len(mins_vals) else 0.0
+        if isfinite(max_m) and max_m > 0:
+            pct = st.session_state.get("min_pct_minutes", 0.30)
+            cut = max_m * float(pct)
+            df_f = df_f[mins_vals >= cut]
+            st.sidebar.caption(f"Filtro aplicado: ≥ {int(pct*100)}% de {mins_col} (cutoff ≈ {cut:,.0f}).")
+        else:
+            st.sidebar.caption("No se aplicó filtro de minutos (máximo = 0).")
+    except Exception:
+        st.sidebar.caption("No se aplicó filtro de minutos por error al parsear.")
+else:
+    st.sidebar.caption("No hay columna de minutos detectable; se omite filtro de minutos.")
+
 try:
     df_for_model, X, y, num_cols = select_numeric(df_f)
 except Exception as e:
@@ -621,15 +691,6 @@ model, metrics, y_hat, spaces = train_pipeline(df_for_model, X, y, fast_mode)
 df_pred = df_for_model.copy()
 df_pred["predicted_value"] = y_hat
 df_pred["delta_pred_real"] = df_pred["predicted_value"] - df_pred[CFG.TARGET]
-
-# ---- asegurar _GroupPos globalmente ----
-if "_GroupPos" not in df_pred.columns:
-    pos_series = df_pred.get(CFG.POS_COL, pd.Series([""] * len(df_pred), index=df_pred.index))
-    df_pred["_GroupPos"] = pos_series.apply(normalize_pos_to_group)
-else:
-    df_pred["_GroupPos"] = df_pred["_GroupPos"].apply(
-        lambda v: v if isinstance(v, (list, tuple, set)) else normalize_pos_to_group(v)
-    )
 
 # Métricas (tarjetas)
 m1, m2, m3 = st.columns(3)
@@ -675,6 +736,7 @@ with tab_fit:
         if st.button("Evaluar encaje", key="btn_fit_eval"):
             try:
                 res = fitter.rank_signings(target_club, top_k=len(df_pred))
+                df_pred["_GroupPos"] = df_pred.get("_GroupPos", df_pred.get(CFG.POS_COL, "").apply(normalize_pos_to_group))
                 out = fitter.eval_player_in_club(player_name, target_club)
                 st.dataframe(display_money(out), use_container_width=True)
                 st.markdown(
@@ -778,17 +840,16 @@ with tab_impact:
         except Exception:
             return cols[:8]
 
-    # ====== CORRECCIÓN: Radar() sin params/low/high en el constructor + saneo defensivo ======
-    def radar_and_title(player_label: str, club_label: str, grp: str, values_player, values_centroid, ranges, params):
+    def radar_and_title(player_label: str, club_label: str, grp: str,
+                        values_player, values_centroid, ranges, params):
         if not SOCCERPLOTS_AVAILABLE:
             st.info("Instala `soccerplots` para ver radar y plot_text.")
             return
 
-        # Asegurar coherencia de longitudes y evitar NaNs / rangos degenerados
+        # --- saneo de datos ---
         params = list(params)
         n = len(params)
 
-        # recortar/transformar rangos
         ranges_fixed = []
         for i in range(n):
             try:
@@ -804,36 +865,64 @@ with tab_impact:
 
         vp = np.array(values_player, dtype=float)
         vc = np.array(values_centroid, dtype=float)
-        if len(vp) != n:
-            vp = np.resize(vp, n)
-        if len(vc) != n:
-            vc = np.resize(vc, n)
+        if len(vp) != n: vp = np.resize(vp, n)
+        if len(vc) != n: vc = np.resize(vc, n)
         vp = np.nan_to_num(vp, nan=0.0)
         vc = np.nan_to_num(vc, nan=0.0)
 
-        # Constructor simple; los rangos/params van en plot_radar
+        # Colores del tema
+        color_player = THEME_PRIMARY
+        color_centroid = THEME_PRIMARY_DARK
+
+        # Constructor simple; params/ranges van en plot_radar
         radar = Radar()
         fig, ax = radar.plot_radar(
-            ranges=ranges_fixed, params=params, values=[vp.tolist(), vc.tolist()],
-            radar_color=['#10b981', '#3b82f6'], alphas=[0.65, 0.45],
-            title=dict(title_name=player_label, title_color='white',
-                       subtitle=f"vs. perfil {grp} de {club_label}", subtitle_color='#94a3b8'),
+            ranges=ranges_fixed,
+            params=params,
+            values=[vp.tolist(), vc.tolist()],
+            radar_color=[color_player, color_centroid],
+            alphas=[0.65, 0.45],
+            title=dict(
+                title_name=player_label,
+                title_color=THEME_TEXT,
+                subtitle=f"vs. perfil {grp} de {club_label}",
+                subtitle_color="#94a3b8"
+            ),
             compare=True
         )
+
+        # Leyenda explícita
+        import matplotlib.patches as mpatches
+        p_patch = mpatches.Patch(color=color_player, label=player_label, alpha=0.65)
+        c_patch = mpatches.Patch(color=color_centroid, label=f"Perfil {grp} · {club_label}", alpha=0.45)
+        fig.axes[0].legend(handles=[p_patch, c_patch], loc="upper right", frameon=False, labelcolor=THEME_TEXT)
+
+        # Título superior con plot_text (si existe)
         try:
             if plot_text is not None:
-                plot_text(ax=fig.axes[0], x=0.5, y=1.08,
-                          s="Comparativa de Radar — Chalkboard",
-                          color="#fde68a", size=14, ha="center", va="bottom", highlight=True)
+                plot_text(
+                    ax=fig.axes[0], x=0.5, y=1.08,
+                    s="Comparativa de Radar — Chalkboard",
+                    color="#fde68a", size=14, ha="center", va="bottom", highlight=True
+                )
         except Exception:
             pass
+
+        # Fondo acorde al tema
+        fig.patch.set_facecolor(THEME_BG)
+        for a in fig.axes:
+            a.set_facecolor(THEME_BG)
+
         st.pyplot(fig, use_container_width=True)
-    # ====== /CORRECCIÓN ======
 
     if st.button("Simular impacto", key="btn_impact"):
         if player_sel is None:
             st.warning("Elige un jugador.")
         else:
+            # Asegurar que _GroupPos exista en df_pred (se usa para el radar/centroide)
+            if "_GroupPos" not in df_pred.columns:
+                df_pred["_GroupPos"] = df_pred.get(CFG.POS_COL, "").apply(normalize_pos_to_group)
+
             if player_source == "Dataset principal":
                 row_mask = df_pred["Player"].astype(str).str.lower() == player_sel.lower()
                 if not row_mask.any():
@@ -855,8 +944,7 @@ with tab_impact:
                     features = pick_radar_features(list(X.columns))
                     base = df_pred.loc[:, features].apply(pd.to_numeric, errors="coerce").fillna(0.0)
                     ranges = list(zip(base.min().tolist(), base.max().tolist()))
-                    has_grp = df_pred["_GroupPos"].apply(lambda lst: (grp in lst) if isinstance(lst, (list, tuple, set)) else False)
-                    mask_grp = (df_pred["Team"] == club_target_imp) & has_grp
+                    mask_grp = (df_pred["Team"] == club_target_imp) & (df_pred["_GroupPos"].apply(lambda lst: grp in lst if isinstance(lst, list) else False))
                     centroid_vals = df_pred.loc[mask_grp, features].apply(pd.to_numeric, errors="coerce").fillna(0.0).mean().to_numpy()
                     player_vals = df_pred.loc[idx, features].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy()
                     radar_and_title(player_sel, club_target_imp, grp, player_vals, centroid_vals, ranges, features)
@@ -890,8 +978,7 @@ with tab_impact:
                         features = pick_radar_features(list(X.columns))
                         base = df_pred.loc[:, features].apply(pd.to_numeric, errors="coerce").fillna(0.0)
                         ranges = list(zip(base.min().tolist(), base.max().tolist()))
-                        has_grp = df_pred["_GroupPos"].apply(lambda lst: (grp in lst) if isinstance(lst, (list, tuple, set)) else False)
-                        mask_grp = (df_pred["Team"] == club_target_imp) & has_grp
+                        mask_grp = (df_pred["Team"] == club_target_imp) & (df_pred["_GroupPos"].apply(lambda lst: grp in lst if isinstance(lst, list) else False))
                         centroid_vals = df_pred.loc[mask_grp, features].apply(pd.to_numeric, errors="coerce").fillna(0.0).mean().to_numpy()
                         v = []
                         for c in features:
@@ -979,3 +1066,4 @@ with tab_help:
     )
 
 st.success("Listo. Carga datasets, filtra timeframe y explora predicciones, encaje, ranking e impacto. 👌")
+
