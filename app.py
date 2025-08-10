@@ -1,15 +1,16 @@
 # app.py
 # ===============================================================
-# ⚽ SCOUTING TOOL — Streamlit (multi-archivo, timeframe, ML, fit, ranking, RAG, impacto)
+# ⚽ SCOUTING TOOL — Streamlit (ML, fit por grupos, ranking, RAG, impacto + radar)
 # ===============================================================
-# - Carga de 1+ archivos (XLSX/CSV) con autodetección de hoja (XLSX)
-# - Filtro por timeframe (fecha / temporada)
-# - Modelo ML (XGBoost) para "Market value" + métricas rápidas (early stopping)
-# - Perfil de club por GRUPO de posición (PCA), vecinos posicionales y centroides ponderados por minutos
+# - Multi-archivo (XLSX/CSV) con autodetección de hoja (XLSX)
+# - Timeframe (fecha/temporada)
+# - XGBoost para "Market value" (early stopping) + métricas
+# - Perfil de club por GRUPO posicional (PCA), vecinos y centroides ponderados por minutos
 # - Ranking EXCLUYENDO jugadores del club destino + filtros por grupos
-# - NUEVO: Impacto de fichaje (dataset externo opcional) + radar chart jugador vs. centroide
-# - RAG (TF-IDF + ChatOpenAI) sin FAISS
-# - Valores redondeados a millones (display) + descargas CSV + glosario
+# - Impacto de fichaje (puedes cargar dataset externo) + RADAR y títulos con plot_text
+# - RAG (TF-IDF + ChatOpenAI) compatible Py 3.13 (sin FAISS)
+# - Estilo visual “chalkboard” + Comic Sans en todos los gráficos
+# - Dinero formateado a millones, descargas CSV
 # ===============================================================
 
 import os
@@ -29,7 +30,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from xgboost import XGBRegressor
 
-# RAG (chat) con OpenAI
+# ---- RAG (chat) con OpenAI ----
 try:
     from langchain_openai import ChatOpenAI
     from langchain.schema import HumanMessage, SystemMessage
@@ -37,30 +38,52 @@ try:
 except Exception:
     LANGCHAIN_AVAILABLE = False
 
-# Radar chart (soccerplots)
+# ---- Soccerplots (Radar + plot_text) ----
 try:
     from soccerplots.radar_chart import Radar
+    # El módulo de documentación expone plot_text; algunas versiones lo exponen así:
+    try:
+        from soccerplots.plot_text import plot_text  # docs path
+    except Exception:
+        # fallback: versiones que exponen utilidades en utils
+        from soccerplots.utils import plot_text  # type: ignore
     SOCCERPLOTS_AVAILABLE = True
 except Exception:
     SOCCERPLOTS_AVAILABLE = False
+    plot_text = None  # type: ignore
 
-# -------------------------
-# Config & estilo
-# -------------------------
+# ===============================================================
+# Estilo global “chalkboard” + Comic Sans
+# ===============================================================
+plt.style.use('dark_background')
+plt.rcParams['axes.facecolor'] = '#2E2E2E'  # pizarra
+plt.rcParams['axes.edgecolor'] = 'white'
+plt.rcParams['grid.color'] = 'white'
+plt.rcParams['font.family'] = 'Comic Sans MS'
+plt.rcParams['figure.facecolor'] = '#2E2E2E'
+plt.rcParams['savefig.facecolor'] = '#2E2E2E'
+plt.rcParams['text.color'] = 'white'
+
+# ===============================================================
+# Streamlit UI base
+# ===============================================================
 st.set_page_config(page_title="⚽ Scouting Tool", layout="wide", page_icon="⚽")
 st.markdown(
     """
     <style>
-      .small-note { color: #64748b; font-size: 0.92em; }
-      .metric-card { background: #0f172a10; border-radius: 12px; padding: 12px 16px; }
+      .small-note { color: #94a3b8; font-size: 0.92em; }
+      .metric-card { background: #111827; border-radius: 12px; padding: 12px 16px; border: 1px solid #1f2937; }
       .tight { line-height: 1.2; }
-      .pill { display:inline-block; padding:2px 8px; border-radius:999px; background:#0ea5e91a; color:#0369a1; font-size:12px; }
-      .ok { color:#059669 } .warn { color:#b45309 } .bad { color:#dc2626 }
+      .ok { color:#34d399 } .warn { color:#f59e0b } .bad { color:#f87171 }
+      .chalk { color:#e5e7eb; }
     </style>
     """,
     unsafe_allow_html=True
 )
 
+# ===============================================================
+# Config
+# ===============================================================
 @dataclass
 class Config:
     TARGET: str = "Market value"
@@ -73,9 +96,9 @@ class Config:
 CFG = Config()
 np.random.seed(CFG.RANDOM_STATE)
 
-# =========================
-# Normalización de posiciones (diccionario) + Vecinos
-# =========================
+# ===============================================================
+# Normalización de posiciones (tu diccionario) + Vecindarios
+# ===============================================================
 RAW_TO_GROUP = {
   'GK': 'Goalkeeper',
   'LB': 'Fullback',  'LWB': 'Fullback',
@@ -98,8 +121,7 @@ GROUP_NEIGHBORS = {
 ALL_GROUPS = ['Goalkeeper','Fullback','Defender','Midfielder','Wingers','Forward']
 
 def _tokens(s: str) -> list:
-    s = str(s)
-    s = s.replace("/", ",").replace("-", " ")
+    s = str(s).replace("/", ",").replace("-", " ")
     s = " ".join(s.split())
     return [t.strip().upper() for t in s.split(",") if t.strip()]
 
@@ -119,9 +141,9 @@ def normalize_pos_to_group(pos_str: str) -> list:
             seen.add(g); dedup.append(g)
     return dedup
 
-# -------------------------
-# Utilidades base
-# -------------------------
+# ===============================================================
+# Utilidades de IO y limpieza
+# ===============================================================
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [" ".join(str(c).replace("\n"," ").replace("\r"," ").split()) for c in df.columns]
@@ -142,8 +164,7 @@ def display_money(df: pd.DataFrame) -> pd.DataFrame:
 
 def auto_pick_sheet(xls: pd.ExcelFile, filename: str, required={"Player","Team","Market value"}) -> str:
     cands = [s for s in xls.sheet_names if any(k in s.lower() for k in ("search","result","players","jugadores","sheet","datos"))]
-    if cands:
-        return cands[0]
+    if cands: return cands[0]
     best, best_score = None, -1
     for s in xls.sheet_names:
         try:
@@ -226,17 +247,19 @@ def select_numeric(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Ser
         st.warning("El target es constante tras el filtro; el modelo puede no entrenar correctamente.")
     return df2, X, y, num_cols
 
-# -------------------------
-# Espacios latentes & Modelo
-# -------------------------
+# ===============================================================
+# Espacios latentes & Modelo (guardamos scaler y pca para externos)
+# ===============================================================
 class LatentSpaces:
     def __init__(self, n_components=CFG.PCA_COMPONENTS):
         self.scaler = StandardScaler()
         self.pca = PCA(n_components=n_components, random_state=CFG.RANDOM_STATE)
     def fit_transform(self, X: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-        Xs = pd.DataFrame(self.scaler.fit_transform(X), columns=X.columns, index=X.index)
-        pca_latent = pd.DataFrame(self.pca.fit_transform(Xs), index=X.index)
-        return {"scaled": Xs, "pca": pca_latent}
+        Xs_np = self.scaler.fit_transform(X)
+        Xs = pd.DataFrame(Xs_np, columns=X.columns, index=X.index)
+        pca_latent_np = self.pca.fit_transform(Xs)
+        pca_latent = pd.DataFrame(pca_latent_np, index=X.index)
+        return {"scaled": Xs, "pca": pca_latent, "scaler": self.scaler, "pca_model": self.pca}
 
 class MarketValueModel:
     def __init__(self, fast_mode: bool = True):
@@ -245,12 +268,8 @@ class MarketValueModel:
             n_estimators=300 if fast_mode else 600,
             learning_rate=0.08 if fast_mode else 0.06,
             max_depth=6 if fast_mode else 8,
-            subsample=0.85,
-            colsample_bytree=0.85,
-            reg_lambda=1.5,
-            tree_method="hist",
-            n_jobs=0,
-            random_state=CFG.RANDOM_STATE
+            subsample=0.85, colsample_bytree=0.85, reg_lambda=1.5,
+            tree_method="hist", n_jobs=0, random_state=CFG.RANDOM_STATE
         )
     def train(self, X: pd.DataFrame, y: pd.Series) -> Dict[str, float]:
         Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, random_state=CFG.RANDOM_STATE)
@@ -296,20 +315,31 @@ class MarketValueModel:
             cv_mae = float(np.mean(scores)) if scores else float("nan")
         return {"cv_mae": cv_mae, "holdout_mae": holdout_mae, "r2": r2}
 
+def nice_barh(ax, labels, values, title=None):
+    """Barra horizontal moderna con tema chalkboard."""
+    ax.barh(labels, values, color='#94a3b8', edgecolor='white', alpha=0.9, linewidth=1.2)
+    ax.grid(True, axis='x', linestyle='--', alpha=0.35)
+    ax.invert_yaxis()
+    if title:
+        ax.set_title(title, fontsize=16, pad=10)
+    ax.tick_params(colors='white')
+    for spine in ax.spines.values():
+        spine.set_color('white')
+
 def plot_importances(model: XGBRegressor, X: pd.DataFrame, top_n: int = 25):
-    fig, ax = plt.subplots(figsize=(8,5))
     try:
         importances = model.feature_importances_
         idx = np.argsort(importances)[::-1][:top_n]
-        ax.barh(np.array(X.columns)[idx][::-1], np.array(importances)[idx][::-1])
-        ax.set_title("Importancia de características (XGBoost)")
-        st.pyplot(fig)
+        fig, ax = plt.subplots(figsize=(9,6))
+        nice_barh(ax, list(np.array(X.columns)[idx][::-1]), list(np.array(importances)[idx][::-1]),
+                  title="Importancia de características (XGBoost)")
+        st.pyplot(fig, use_container_width=True)
     except Exception as e:
         st.info(f"Importancias no disponibles: {e}")
 
-# -------------------------
-# ClubFit (grupos + vecinos + minutos ponderados)
-# -------------------------
+# ===============================================================
+# ClubFit (grupos + vecinos + minutos ponderados) + Impacto
+# ===============================================================
 def _pick_minutes_column(df: pd.DataFrame) -> Optional[str]:
     cand = [c for c in df.columns if "minute" in c.lower() or c.lower() in ("min","mins","minutes","90s","minutes played")]
     if not cand: return None
@@ -328,6 +358,8 @@ class ClubFit:
         self.df = df_full.copy()
         self.latent = spaces["pca"]
         self.scaled = spaces["scaled"]
+        self.scaler = spaces.get("scaler", None)
+        self.pca_model = spaces.get("pca_model", None)
         self.df["_GroupPos"] = self.df.get(CFG.POS_COL, "").apply(normalize_pos_to_group)
         self.minutes_col = _pick_minutes_column(self.df)
         self.centroids = self._compute_centroids()
@@ -418,25 +450,15 @@ class ClubFit:
         cols = [c for c in cols if c in df.columns]
         return df.sort_values("signing_score", ascending=False).head(top_k)[cols]
 
-    # ---------- Impacto de fichaje ----------
+    # -------- Impacto de fichaje --------
     def impact_of_signing(self, target_club: str, player_vec_pca: np.ndarray,
-                          player_groups: List[str], assumed_minutes: float,
-                          group_for_radar: Optional[str] = None) -> Dict[str, float]:
-        """
-        Simula el impacto de añadir un jugador al club destino:
-        - Delta fit promedio del grupo (cohesión)
-        - Deriva del centroide del grupo (norma L2)
-        - Fit estimado del jugador con el club
-        - Position match escalar (1/0.7/0.2)
-        Devuelve dict con métricas.
-        """
-        # elegir grupo principal (para centroides y radar): 1) exacto disponible, 2) vecino, 3) primero
+                          player_groups: List[str], assumed_minutes: float) -> Dict[str, float]:
+        # elegir grupo principal
         grp_chosen = None
         for g in player_groups:
             if (target_club, g) in self.centroids:
                 grp_chosen = g; break
         if not grp_chosen:
-            # vecino
             for g in player_groups:
                 for ng in GROUP_NEIGHBORS.get(g, set()):
                     if (target_club, ng) in self.centroids:
@@ -444,22 +466,17 @@ class ClubFit:
                 if grp_chosen: break
         if not grp_chosen and player_groups:
             grp_chosen = player_groups[0]
-        if group_for_radar:
-            grp_chosen = group_for_radar
 
-        # índices del club en ese grupo
-        club_mask = (self.df["Team"] == target_club) & self.df["_GroupPos"].apply(lambda lst: grp_chosen in lst)
+        club_mask = (self.df["Team"] == target_club) & self.df["_GroupPos"].apply(lambda lst: grp_chosen in lst if isinstance(lst, list) else False)
         idxs = self.df[club_mask].index.tolist()
 
+        base_fit, pm = self._best_similarity_vs_club(player_vec_pca, player_groups, target_club)
         if not idxs:
-            # no hay grupo definido en el club → todo baseline 0
-            base_fit, pm = self._best_similarity_vs_club(player_vec_pca, player_groups, target_club)
             return {
                 "player_fit": base_fit, "position_match": pm, "centroid_drift": 0.0,
-                "group_cohesion_delta": 0.0, "group_size": 0
+                "group_cohesion_delta": 0.0, "group_size": 0, "grp_for_radar": grp_chosen or "Midfielder"
             }
 
-        # centroide actual (ponderado por minutos si hay)
         if self.minutes_col and self.minutes_col in self.df.columns:
             w = self.df.loc[idxs, self.minutes_col].astype(float).fillna(0).to_numpy()
             if w.sum() > 0:
@@ -469,7 +486,6 @@ class ClubFit:
         else:
             centroid_old = self.latent.loc[idxs].mean(axis=0).to_numpy()
 
-        # nuevo centroide con el jugador
         assumed_minutes = max(0.0, float(assumed_minutes))
         if self.minutes_col and self.minutes_col in self.df.columns:
             w = self.df.loc[idxs, self.minutes_col].astype(float).fillna(0).to_numpy()
@@ -480,22 +496,13 @@ class ClubFit:
             else:
                 centroid_new = centroid_old
         else:
-            # media simple
             centroid_new = (self.latent.loc[idxs].to_numpy().sum(axis=0) + player_vec_pca) / (len(idxs) + 1)
 
         centroid_drift = float(np.linalg.norm(centroid_new - centroid_old))
 
-        # cohesión del grupo: similitud promedio al centroide antes y después
-        sims_old = []
-        sims_new = []
-        for i in idxs:
-            vec_i = self.latent.loc[i].to_numpy()
-            sims_old.append(self._cosine(vec_i, centroid_old))
-            sims_new.append(self._cosine(vec_i, centroid_new))
+        sims_old = [self._cosine(self.latent.loc[i].to_numpy(), centroid_old) for i in idxs]
+        sims_new = [self._cosine(self.latent.loc[i].to_numpy(), centroid_new) for i in idxs]
         group_cohesion_delta = float(np.mean(sims_new) - np.mean(sims_old))
-
-        # fit del jugador (contra club destino) + position_match
-        base_fit, pm = self._best_similarity_vs_club(player_vec_pca, player_groups, target_club)
 
         return {
             "player_fit": base_fit,
@@ -503,38 +510,37 @@ class ClubFit:
             "centroid_drift": centroid_drift,
             "group_cohesion_delta": group_cohesion_delta,
             "group_size": len(idxs),
-            "grp_for_radar": grp_chosen
+            "grp_for_radar": grp_chosen or "Midfielder"
         }
 
-# -------------------------
-# Sidebar (inputs)
-# -------------------------
+# ===============================================================
+# Sidebar (inputs) — keys ÚNICOS para evitar StreamlitDuplicateElementId
+# ===============================================================
 with st.sidebar:
     st.header("① Carga de archivos")
-    uploaded_files = st.file_uploader("Sube uno o varios (.xlsx / .csv)", type=["xlsx","csv"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader("Sube uno o varios (.xlsx / .csv)", type=["xlsx","csv"], accept_multiple_files=True, key="u_main")
 
     st.header("② Filtro timeframe")
     st.caption("Se aplica ANTES de entrenar el modelo y calcular encaje/ranking.")
 
     st.header("③ Clave OpenAI (RAG)")
     default_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-    api_key = st.text_input("OPENAI_API_KEY", type="password", value=default_key, help="Usa Secrets en producción; aquí puedes pegarla temporalmente.")
+    api_key = st.text_input("OPENAI_API_KEY", type="password", value=default_key, help="Usa Secrets en producción; aquí puedes pegarla temporalmente.", key="openai_key")
 
     st.header("④ Parámetros")
-    fast_mode = st.checkbox("Modo rápido (entrena más veloz, sin CV)", value=True)
-    top_k = st.number_input("Top K (ranking)", min_value=5, max_value=200, value=CFG.TOP_K_RECS, step=1)
-    show_importances = st.checkbox("Mostrar importancias del modelo", value=True)
+    fast_mode = st.checkbox("Modo rápido (entrena más veloz, sin CV)", value=True, key="fast_mode")
+    top_k = st.number_input("Top K (ranking)", min_value=5, max_value=200, value=CFG.TOP_K_RECS, step=1, key="topk_rank")
+    show_importances = st.checkbox("Mostrar importancias del modelo", value=True, key="show_imps")
 
-st.title("⚽ Scouting Tool — Avanzada")
-st.caption("Multi-archivo · Timeframe · ML · Fit por grupos · Vecinos de rol · Minutos ponderados · Ranking · RAG · Impacto de fichaje")
+st.title("⚽ Scouting Tool — Avanzada (Chalkboard theme)")
 
 if not uploaded_files:
     st.info("Sube al menos un archivo para comenzar.")
     st.stop()
 
-# -------------------------
-# Unir archivos
-# -------------------------
+# ===============================================================
+# Merge datasets
+# ===============================================================
 frames = []
 for f in uploaded_files:
     try:
@@ -547,9 +553,9 @@ for f in uploaded_files:
 df_raw = pd.concat(frames, ignore_index=True, sort=False)
 date_cols, season_cols = detect_time_columns(df_raw)
 
-# -------------------------
-# Controles timeframe
-# -------------------------
+# ===============================================================
+# Timeframe controls
+# ===============================================================
 st.subheader("Vista previa y timeframe")
 st.dataframe(df_raw.head(15), use_container_width=True)
 
@@ -558,7 +564,7 @@ date_col = season_col = None
 date_range = seasons_selected = None
 
 with col1:
-    chosen_date_col = st.selectbox("Columna de fecha (opcional)", options=["(ninguna)"]+date_cols, index=0)
+    chosen_date_col = st.selectbox("Columna de fecha (opcional)", options=["(ninguna)"]+date_cols, index=0, key="datecol")
     if chosen_date_col != "(ninguna)":
         series_dt = pd.to_datetime(df_raw[chosen_date_col], errors="coerce").dropna()
         if series_dt.empty:
@@ -566,21 +572,21 @@ with col1:
         else:
             min_dt, max_dt = series_dt.min(), series_dt.max()
             date_range = st.slider("Rango de fechas", min_value=min_dt.to_pydatetime(), max_value=max_dt.to_pydatetime(),
-                                   value=(min_dt.to_pydatetime(), max_dt.to_pydatetime()))
+                                   value=(min_dt.to_pydatetime(), max_dt.to_pydatetime()), key="dateslider")
             date_col = chosen_date_col
 
 with col2:
-    chosen_season_col = st.selectbox("Columna de temporada/año (opcional)", options=["(ninguna)"]+season_cols, index=0)
+    chosen_season_col = st.selectbox("Columna de temporada/año (opcional)", options=["(ninguna)"]+season_cols, index=0, key="seasoncol")
     if chosen_season_col != "(ninguna)":
         uniq = sorted([x for x in df_raw[chosen_season_col].dropna().unique().tolist()])
-        seasons_selected = st.multiselect("Temporadas / Años", options=uniq, default=uniq)
+        seasons_selected = st.multiselect("Temporadas / Años", options=uniq, default=uniq, key="seasonmulti")
         season_col = chosen_season_col
 
 st.caption("Todo se calcula **sólo** con datos dentro del timeframe elegido (Team within selected timeframe).")
 
-# -------------------------
-# Aplicar timeframe y preparar datos
-# -------------------------
+# ===============================================================
+# Prep data
+# ===============================================================
 df_f = apply_timeframe(df_raw, date_col, date_range, season_col, seasons_selected)
 if df_f.empty:
     st.warning("El filtro de timeframe dejó el dataset vacío. Ajusta los filtros.")
@@ -592,7 +598,9 @@ except Exception as e:
     st.error(f"Error preparando datos: {e}")
     st.stop()
 
-# === entrenamiento con progreso (cacheado) ===
+# ===============================================================
+# Train (cache)
+# ===============================================================
 @st.cache_resource(show_spinner=False)
 def train_pipeline(df_in: pd.DataFrame, X: pd.DataFrame, y: pd.Series, fast_mode: bool):
     status = st.empty()
@@ -612,27 +620,26 @@ def train_pipeline(df_in: pd.DataFrame, X: pd.DataFrame, y: pd.Series, fast_mode
 st.subheader("Entrenamiento del modelo (dentro del timeframe)")
 model, metrics, y_hat, spaces = train_pipeline(df_for_model, X, y, fast_mode)
 
-# Ensamble predicciones
 df_pred = df_for_model.copy()
 df_pred["predicted_value"] = y_hat
 df_pred["delta_pred_real"] = df_pred["predicted_value"] - df_pred[CFG.TARGET]
 
-# Métricas
+# Métricas (tarjetas)
 m1, m2, m3 = st.columns(3)
-m1.markdown(f"<div class='metric-card tight'><b>CV MAE</b><br>{'—' if np.isnan(metrics['cv_mae']) else f'{metrics['cv_mae']:,.0f}'}</div>", unsafe_allow_html=True)
-m2.markdown(f"<div class='metric-card tight'><b>Holdout MAE</b><br>{metrics['holdout_mae']:,.0f}</div>", unsafe_allow_html=True)
-m3.markdown(f"<div class='metric-card tight'><b>R²</b><br>{metrics['r2']:.3f}</div>", unsafe_allow_html=True)
+m1.markdown(f"<div class='metric-card tight chalk'><b>CV MAE</b><br>{'—' if np.isnan(metrics['cv_mae']) else f'{metrics['cv_mae']:,.0f}'}</div>", unsafe_allow_html=True)
+m2.markdown(f"<div class='metric-card tight chalk'><b>Holdout MAE</b><br>{metrics['holdout_mae']:,.0f}</div>", unsafe_allow_html=True)
+m3.markdown(f"<div class='metric-card tight chalk'><b>R²</b><br>{metrics['r2']:.3f}</div>", unsafe_allow_html=True)
 
-# Importancias
-if st.checkbox("Mostrar importancias del modelo", value=True):
+if show_importances:
+    st.markdown("**Importancia de variables**")
     plot_importances(model.model, X, top_n=25)
 
 # Fit scorer
 fitter = ClubFit(df_pred, spaces)
 
-# -------------------------
+# ===============================================================
 # Tabs
-# -------------------------
+# ===============================================================
 tab_pred, tab_fit, tab_rank, tab_impact, tab_rag, tab_help = st.tabs(
     ["📈 Predicciones", "🎯 Encaje jugador→club", "🏟 Mejores incorporaciones", "🧩 Impacto de fichaje", "💬 Chat (RAG)", "📘 Glosario"]
 )
@@ -644,7 +651,7 @@ with tab_pred:
     st.caption("Se muestran 500 filas por rendimiento. Descarga para ver completo.")
     st.download_button("Descargar predicciones (CSV)",
                        data=df_pred[cols_show].to_csv(index=False).encode("utf-8"),
-                       file_name="predicciones.csv", mime="text/csv")
+                       file_name="predicciones.csv", mime="text/csv", key="dl_pred")
 
 with tab_fit:
     st.subheader("Encaje de un jugador en un club")
@@ -655,20 +662,21 @@ with tab_fit:
         clubs = sorted(df_pred["Team"].dropna().unique().tolist())
         c1, c2 = st.columns(2)
         with c1:
-            player_name = st.selectbox("Jugador", options=players)
+            player_name = st.selectbox("Jugador", options=players, key="fit_player_sel")
         with c2:
-            target_club = st.selectbox("Club destino", options=clubs)
-        if st.button("Evaluar encaje"):
+            target_club = st.selectbox("Club destino", options=clubs, key="fit_club_sel")
+        if st.button("Evaluar encaje", key="btn_fit_eval"):
             try:
-                res = fitter.eval_player_in_club(player_name, target_club)
-                st.dataframe(display_money(res), use_container_width=True)
+                res = fitter.rank_signings(target_club, top_k=len(df_pred))
+                df_pred["_GroupPos"] = df_pred.get("_GroupPos", df_pred.get(CFG.POS_COL, "").apply(normalize_pos_to_group))
+                out = fitter.eval_player_in_club(player_name, target_club)
+                st.dataframe(display_money(out), use_container_width=True)
                 st.markdown(
                     """
                     <div class='small-note'>
-                    <b>_GroupPos</b>: grupo(s) posicional(es) normalizados (Goalkeeper, Fullback, Defender, Midfielder, Wingers, Forward).<br>
-                    <b>fit_score (0–1)</b>: similitud del jugador con el perfil del club por grupo (PCA), ponderado por minutos en los centroides.<br>
-                    <b>position_match</b>: 1.0 (grupo exacto), 0.7 (grupo vecino), 0.2 (sin matching).<br>
-                    <b>rank_for_target</b>: puesto del jugador en el ranking del club (1 = mejor), excluyendo jugadores que ya están en el club.
+                    <b>_GroupPos</b>: grupos posicionales normalizados (Goalkeeper, Fullback, Defender, Midfielder, Wingers, Forward).<br>
+                    <b>fit_score (0–1)</b>: similitud del jugador con el perfil del club (PCA, con centroides ponderados por minutos).<br>
+                    <b>rank_for_target</b>: posición del jugador en el ranking del club (1=mejor), excluyendo a quienes ya están en ese club.
                     </div>
                     """, unsafe_allow_html=True
                 )
@@ -681,35 +689,34 @@ with tab_rank:
         st.error("Necesito columna 'Team'.")
     else:
         clubs = sorted(df_pred["Team"].dropna().unique().tolist())
-        target_club_r = st.selectbox("Club destino", options=clubs, key="rank_club_sel")
-        req_groups = st.multiselect("Grupos requeridos (opcional)", options=ALL_GROUPS, default=[])
-        strict_groups = st.checkbox("Modo estricto por grupo", value=False)
-        if st.button("Calcular ranking"):
+        target_club_r = st.selectbox("Club destino", options=clubs, key="rank_club_sel_unique")
+        req_groups = st.multiselect("Grupos requeridos (opcional)", options=ALL_GROUPS, default=[], key="rank_groups")
+        strict_groups = st.checkbox("Modo estricto por grupo", value=False, key="rank_strict")
+        if st.button("Calcular ranking", key="btn_rank"):
             try:
                 req_set = set(req_groups) if req_groups else None
-                board = fitter.rank_signings(target_club_r, top_k=int(CFG.TOP_K_RECS),
+                board = fitter.rank_signings(target_club_r, top_k=int(top_k),
                                              required_groups=req_set, strict_groups=strict_groups)
                 st.dataframe(display_money(board), use_container_width=True)
                 st.caption("Centroides por grupo ponderados por minutos (si hay); se consideran vecinos de rol.")
                 st.download_button(f"Descargar ranking {target_club_r} (CSV)",
                                    data=board.to_csv(index=False).encode("utf-8"),
-                                   file_name=f"ranking_{target_club_r}.csv", mime="text/csv")
+                                   file_name=f"ranking_{target_club_r}.csv", mime="text/csv", key="dl_rank")
             except Exception as e:
                 st.error(str(e))
 
-# -------------------------
-# 🧩 Impacto de fichaje
-# -------------------------
+# ===============================================================
+# 🧩 Impacto de fichaje (dataset externo + radar + plot_text)
+# ===============================================================
 with tab_impact:
     st.subheader("Impacto de fichaje (dataset externo opcional + radar)")
 
     c_ext1, c_ext2 = st.columns([2,1])
     with c_ext1:
-        ext_file = st.file_uploader("Dataset externo (opcional) — otra liga (.xlsx/.csv)", type=["xlsx","csv"], accept_multiple_files=False, key="ext")
+        ext_file = st.file_uploader("Dataset externo (opcional) — otra liga (.xlsx/.csv)", type=["xlsx","csv"], accept_multiple_files=False, key="ext_upl")
     with c_ext2:
-        expected_minutes = st.number_input("Minutos esperados del jugador", min_value=0, max_value=6000, value=1800, step=90)
+        expected_minutes = st.number_input("Minutos esperados del jugador", min_value=0, max_value=6000, value=1800, step=90, key="exp_min")
 
-    # Construir pools de jugadores: principal y externo (si hay)
     df_ext = None
     if ext_file is not None:
         try:
@@ -717,159 +724,79 @@ with tab_impact:
         except Exception as e:
             st.warning(f"No se pudo leer el dataset externo: {e}")
 
-    # Fuente y selector de jugador
     pool_main = sorted(df_pred["Player"].dropna().unique().tolist()) if "Player" in df_pred.columns else []
     pool_ext = sorted(df_ext["Player"].dropna().unique().tolist()) if (df_ext is not None and "Player" in df_ext.columns) else []
 
     c_src1, c_src2 = st.columns(2)
     with c_src1:
-        player_source = st.radio("Fuente del jugador a evaluar", options=["Dataset principal","Dataset externo"], horizontal=True)
+        player_source = st.radio("Fuente del jugador a evaluar", options=["Dataset principal","Dataset externo"], horizontal=True, key="impact_src")
     with c_src2:
         clubs_imp = sorted(df_pred["Team"].dropna().unique().tolist()) if "Team" in df_pred.columns else []
-        club_target_imp = st.selectbox("Club destino", options=clubs_imp)
+        club_target_imp = st.selectbox("Club destino", options=clubs_imp, key="impact_club_sel")
 
     if player_source == "Dataset principal":
-        player_sel = st.selectbox("Jugador (principal)", options=pool_main)
+        player_sel = st.selectbox("Jugador (principal)", options=pool_main, key="impact_player_main")
     else:
         if df_ext is None:
             st.info("Sube un dataset externo para usar esta opción.")
             player_sel = None
         else:
-            player_sel = st.selectbox("Jugador (externo)", options=pool_ext)
+            player_sel = st.selectbox("Jugador (externo)", options=pool_ext, key="impact_player_ext")
 
-    # Helper: transformar jugador externo al espacio del modelo (mismas columnas)
-    def external_player_vector(df_ext_in: pd.DataFrame, name: str) -> Optional[Dict]:
+    # Transformar externo al espacio del modelo con scaler y pca entrenados
+    def external_to_pca(df_ext_in: pd.DataFrame, name: str) -> Optional[Dict]:
         if df_ext_in is None or name is None: return None
         rows = df_ext_in[df_ext_in["Player"].astype(str).str.lower() == str(name).lower()]
         if rows.empty: return None
         row = rows.iloc[0]
-
-        # extrae posiciones
         groups = normalize_pos_to_group(row.get(CFG.POS_COL, ""))
-
-        # construir vector de features con columnas de X (faltantes=0)
+        # features como X
         vec_raw = {col: pd.to_numeric(row.get(col, 0), errors="coerce") for col in X.columns}
         x_row = pd.DataFrame([vec_raw], index=[0]).fillna(0.0)
-        # estandarizar con scaler entrenado
-        x_scaled = pd.DataFrame(spaces["scaled"].mean()*0, columns=spaces["scaled"].columns, index=[0])
-        try:
-            x_scaled = pd.DataFrame(spaces["scaled"].iloc[:0].copy())
-        except Exception:
-            pass
-        # aplicar scaler real del pipeline
-        scaler = StandardScaler()
-        scaler.mean_ = spaces["scaled"].mean().to_numpy()
-        scaler.scale_ = spaces["scaled"].std().replace(0, 1.0).to_numpy()
-        scaler.n_features_in_ = len(spaces["scaled"].columns)
-        scaled_vals = (x_row[spaces["scaled"].columns].to_numpy() - scaler.mean_) / scaler.scale_
-        x_scaled = pd.DataFrame(scaled_vals, columns=spaces["scaled"].columns, index=[0])
+        scaler = spaces["scaler"]
+        pca = spaces["pca_model"]
+        x_scaled = scaler.transform(x_row[scaler.feature_names_in_]) if hasattr(scaler, "feature_names_in_") else scaler.transform(x_row.values)
+        pca_vec = pca.transform(x_scaled)[0]
+        return {"groups": groups if groups else ["Midfielder"], "pca_vec": pca_vec, "x_row": x_row}
 
-        # pca (usar componentes del pipeline)
-        pca = PCA(n_components=spaces["pca"].shape[1])
-        # reconstruimos atributos mínimos para proyectar (usamos componentes y medias del fit original)
-        pca.components_ = np.zeros_like(spaces["pca"].to_numpy()[:CFG.PCA_COMPONENTS].T)  # placeholder
-        # Para evitar dependencia interna, aproximamos con proyección lineal usando covarianza del set actual:
-        # en lugar de replicar el pca fitted, usamos el promedio de latentes del set más el delta en escalado.
-        # (Simplificación robusta en despliegue sin serialización del PCA)
-        # Usaremos vec del jugador en el mismo espacio "scaled" y aproximaremos PCA con SVD al vuelo de X scaled + jugador
-        X_aug = np.vstack([spaces["scaled"].to_numpy(), scaled_vals])
-        try:
-            U, S, VT = np.linalg.svd(X_aug - X_aug.mean(axis=0), full_matrices=False)
-            latent_ext = (U @ np.diag(S))[-1, :CFG.PCA_COMPONENTS]
-        except Exception:
-            latent_ext = np.zeros(CFG.PCA_COMPONENTS, dtype=float)
-
-        return {
-            "groups": groups if groups else ["Midfielder"],  # fallback
-            "x_scaled": scaled_vals.ravel(),
-            "pca_vec": latent_ext
-        }
-
-    # Selección de features para radar (automática)
+    # radar helpers
     def pick_radar_features(cols: List[str]) -> List[str]:
-        # preferimos métricas "per 90" o técnicas conocidas; si no, top importances
-        preferred = [c for c in cols if any(k in c.lower() for k in [" per 90", "per90","xg","xa","pass","shot","duel","dribble","tackle","interception","key pass","cross","progress"])]
+        preferred = [c for c in cols if any(k in c.lower() for k in [" per 90","per90","xg","xa","pass","shot","duel","dribble","tackle","interception","key pass","cross","progress","press"])]
         if len(preferred) >= 8:
             return preferred[:8]
-        # completa hasta 8 con las más importantes del modelo
         try:
             imp = model.model.feature_importances_
             order = np.argsort(imp)[::-1]
             extras = [cols[i] for i in order if cols[i] not in preferred]
             return (preferred + extras)[:8]
         except Exception:
-            # fallback: primeras numéricas
             return cols[:8]
 
-    def plot_radar_for_player(player_idx: Optional[int], ext_info: Optional[Dict], grp: str):
+    def radar_and_title(player_label: str, club_label: str, grp: str, values_player, values_centroid, ranges, params):
         if not SOCCERPLOTS_AVAILABLE:
-            st.info("Instala `soccerplots` en requirements.txt para ver el radar.")
+            st.info("Instala `soccerplots` para ver radar y plot_text.")
             return
-        # dataset base para min/max y centroide del grupo
-        group_mask = (df_pred["Team"] == club_target_imp) & (df_pred["_GroupPos"].apply(lambda lst: grp in lst) if "_GroupPos" in df_pred.columns else False)
-        grp_idxs = df_pred[group_mask].index.tolist()
-        if not grp_idxs:
-            st.info("El club no tiene jugadores en ese grupo dentro del timeframe.")
-            return
-
-        # features candidatos (coinciden con X)
-        features = pick_radar_features(list(X.columns))
-        if not features:
-            st.info("No encontré features adecuados para el radar.")
-            return
-
-        # min/max en el conjunto filtrado
-        base = df_pred.loc[:, features].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-        r_low = base.min().tolist()
-        r_high = base.max().tolist()
-
-        # vector del centroide en espacio original escalado → promediamos en scaled y desescalamos al rango 0-1 para radar
-        scaled_group = spaces["scaled"].loc[grp_idxs, features]
-        centroid_scaled = scaled_group.mean(axis=0).to_numpy()
-
-        # valores jugador
-        if player_idx is not None:
-            player_vals = df_pred.loc[player_idx, features].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy()
-        elif ext_info is not None:
-            # si es externo y no trae todas las columnas, completa con 0
-            v = []
-            for c in features:
-                try:
-                    v.append(float(df_ext.loc[df_ext["Player"].astype(str).str.lower()==player_sel.lower(), c].iloc[0]))
-                except Exception:
-                    v.append(0.0)
-            player_vals = np.array(v, dtype=float)
-        else:
-            st.info("No se pudo construir el vector del jugador para el radar.")
-            return
-
-        # construir radar
-        params = features
-        low = r_low
-        high = r_high
-        values_centroid = centroid_scaled  # ya en espacio estandarizado
-        # estandarizamos player_vals con los mismos low/high → para comparabilidad visual
-        # (soccerplots acepta rangos y valores absolutos)
-        values_player = player_vals
-
-        radar = Radar(params=params, low=low, high=high, round_int=[False]*len(params))
+        radar = Radar(params=params, low=[r[0] for r in ranges], high=[r[1] for r in ranges], round_int=[False]*len(params))
         fig, ax = radar.plot_radar(
-            ranges=list(zip(low, high)),
-            params=params,
-            values=[values_player, values_centroid],
-            radar_color=['#10b981', '#3b82f6'],
-            alphas=[0.6, 0.4],
-            title=dict(title_name=f"{player_sel}", title_color='#0f172a', subtitle=f"vs. perfil {grp} de {club_target_imp}", subtitle_color='#334155'),
+            ranges=ranges, params=params, values=[values_player, values_centroid],
+            radar_color=['#10b981', '#3b82f6'], alphas=[0.65, 0.45],
+            title=dict(title_name=player_label, title_color='white', subtitle=f"vs. perfil {grp} de {club_label}", subtitle_color='#94a3b8'),
             compare=True
         )
+        # plot_text para “rotular” con estilo (si está disponible)
+        try:
+            if plot_text is not None:
+                plot_text(ax=fig.axes[0], x=0.5, y=1.08,
+                          s="Comparativa de Radar — Chalkboard",
+                          color="#fde68a", size=14, ha="center", va="bottom", highlight=True)
+        except Exception:
+            pass
         st.pyplot(fig, use_container_width=True)
 
-    # Acción
-    if st.button("Simular impacto"):
+    if st.button("Simular impacto", key="btn_impact"):
         if player_sel is None:
             st.warning("Elige un jugador.")
         else:
-            # Construir vector PCA del jugador
             if player_source == "Dataset principal":
                 row_mask = df_pred["Player"].astype(str).str.lower() == player_sel.lower()
                 if not row_mask.any():
@@ -879,66 +806,87 @@ with tab_impact:
                     p_groups = df_pred.loc[idx].get("_GroupPos", normalize_pos_to_group(df_pred.loc[idx].get(CFG.POS_COL, "")))
                     p_vec_pca = spaces["pca"].loc[idx].to_numpy()
                     impact = fitter.impact_of_signing(club_target_imp, p_vec_pca, p_groups, assumed_minutes=expected_minutes)
-                    # Dictamen
                     tag = "Titular probable" if (impact["player_fit"]>=0.65 and impact["position_match"]>=0.7) else ("Rotación competitiva" if impact["player_fit"]>=0.45 else "Ajuste gradual")
-                    st.markdown(f"**Dictamen:** {tag}")
                     colA, colB, colC, colD = st.columns(4)
                     colA.metric("Fit del jugador", f"{impact['player_fit']:.2f}")
                     colB.metric("Match posicional", f"{impact['position_match']:.2f}")
                     colC.metric("Δ Cohesión grupo", f"{impact['group_cohesion_delta']:+.3f}")
                     colD.metric("Deriva centroide", f"{impact['centroid_drift']:.3f}")
-                    st.caption("Δ Cohesión: cambio en la similitud promedio de los jugadores del grupo con su centroide tras añadir al jugador. Deriva: norma L2 del movimiento del centroide.")
-
+                    st.markdown(f"**Dictamen:** {tag}")
                     # Radar
                     grp = impact.get("grp_for_radar", (p_groups[0] if p_groups else "Midfielder"))
-                    plot_radar_for_player(idx, None, grp)
-
+                    features = pick_radar_features(list(X.columns))
+                    base = df_pred.loc[:, features].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+                    ranges = list(zip(base.min().tolist(), base.max().tolist()))
+                    # centroide del grupo (en espacio original → usar media de las features)
+                    mask_grp = (df_pred["Team"] == club_target_imp) & (df_pred["_GroupPos"].apply(lambda lst: grp in lst if isinstance(lst, list) else False))
+                    centroid_vals = df_pred.loc[mask_grp, features].apply(pd.to_numeric, errors="coerce").fillna(0.0).mean().to_numpy()
+                    player_vals = df_pred.loc[idx, features].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy()
+                    radar_and_title(player_sel, club_target_imp, grp, player_vals, centroid_vals, ranges, features)
                     # Summary
                     st.markdown(
                         f"""
                         **Resumen automático**  
-                        - El perfil del jugador se alinea con **{grp}** del **{club_target_imp}** con fit **{impact['player_fit']:.2f}** y match posicional **{impact['position_match']:.2f}**.  
-                        - La **cohesión del grupo** cambiaría en **{impact['group_cohesion_delta']:+.3f}** y el centroide del grupo **derivaría {impact['centroid_drift']:.3f}** unidades en PCA.  
-                        - Con **{expected_minutes}′** previstos, el impacto proyectado sugiere: **{tag}**.
+                        - Encaje en **{grp}** del **{club_target_imp}** → fit **{impact['player_fit']:.2f}**, match **{impact['position_match']:.2f}**.  
+                        - La **cohesión** del grupo cambiaría **{impact['group_cohesion_delta']:+.3f}**; el **centroide** se movería **{impact['centroid_drift']:.3f}** (PCA).  
+                        - Con **{expected_minutes}′** previstos → **{tag}**.
                         """.strip()
                     )
             else:
                 if df_ext is None:
                     st.error("Carga primero un dataset externo.")
                 else:
-                    ext_info = external_player_vector(df_ext, player_sel)
-                    if not ext_info:
+                    ext = external_to_pca(df_ext, player_sel)
+                    if not ext:
                         st.error("No se pudo construir el perfil del jugador externo (¿faltan columnas?).")
                     else:
-                        impact = fitter.impact_of_signing(club_target_imp, ext_info["pca_vec"], ext_info["groups"], assumed_minutes=expected_minutes)
+                        impact = fitter.impact_of_signing(club_target_imp, ext["pca_vec"], ext["groups"], assumed_minutes=expected_minutes)
                         tag = "Titular probable" if (impact["player_fit"]>=0.65 and impact["position_match"]>=0.7) else ("Rotación competitiva" if impact["player_fit"]>=0.45 else "Ajuste gradual")
-                        st.markdown(f"**Dictamen:** {tag}")
                         colA, colB, colC, colD = st.columns(4)
                         colA.metric("Fit del jugador", f"{impact['player_fit']:.2f}")
                         colB.metric("Match posicional", f"{impact['position_match']:.2f}")
                         colC.metric("Δ Cohesión grupo", f"{impact['group_cohesion_delta']:+.3f}")
                         colD.metric("Deriva centroide", f"{impact['centroid_drift']:.3f}")
-                        grp = impact.get("grp_for_radar", (ext_info["groups"][0] if ext_info["groups"] else "Midfielder"))
-                        plot_radar_for_player(None, ext_info, grp)
+                        st.markdown(f"**Dictamen:** {tag}")
+                        # Radar: si el externo no trae todas las cols, 0s para faltantes
+                        grp = impact.get("grp_for_radar", (ext["groups"][0] if ext["groups"] else "Midfielder"))
+                        features = pick_radar_features(list(X.columns))
+                        base = df_pred.loc[:, features].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+                        ranges = list(zip(base.min().tolist(), base.max().tolist()))
+                        # centroide del grupo
+                        mask_grp = (df_pred["Team"] == club_target_imp) & (df_pred["_GroupPos"].apply(lambda lst: grp in lst if isinstance(lst, list) else False))
+                        centroid_vals = df_pred.loc[mask_grp, features].apply(pd.to_numeric, errors="coerce").fillna(0.0).mean().to_numpy()
+                        # valores jugador externo (si no hay columna → 0)
+                        v = []
+                        for c in features:
+                            try:
+                                v.append(float(df_ext.loc[df_ext["Player"].astype(str).str.lower()==player_sel.lower(), c].iloc[0]))
+                            except Exception:
+                                v.append(0.0)
+                        player_vals = np.array(v, dtype=float)
+                        radar_and_title(player_sel, club_target_imp, grp, player_vals, centroid_vals, ranges, features)
                         st.markdown(
                             f"""
                             **Resumen automático**  
-                            - El perfil del jugador externo se alinea con **{grp}** del **{club_target_imp}** con fit **{impact['player_fit']:.2f}** y match posicional **{impact['position_match']:.2f}**.  
-                            - La **cohesión del grupo** cambiaría en **{impact['group_cohesion_delta']:+.3f}** y el centroide del grupo **derivaría {impact['centroid_drift']:.3f}** unidades en PCA.  
-                            - Con **{expected_minutes}′** previstos, el impacto proyectado sugiere: **{tag}**.
+                            - Encaje en **{grp}** del **{club_target_imp}** → fit **{impact['player_fit']:.2f}**, match **{impact['position_match']:.2f}**.  
+                            - La **cohesión** del grupo cambiaría **{impact['group_cohesion_delta']:+.3f}**; el **centroide** se movería **{impact['centroid_drift']:.3f}** (PCA).  
+                            - Con **{expected_minutes}′** previstos → **{tag}**.
                             """.strip()
                         )
 
+# ===============================================================
+# 💬 RAG
+# ===============================================================
 with tab_rag:
     st.subheader("Chat con RAG (TF-IDF, OpenAI)")
     if not LANGCHAIN_AVAILABLE:
         st.info("RAG deshabilitado: falta langchain-openai. Revisa requirements.txt.")
     else:
         q_default = "Dame 5 posibles fichajes con alto fit y buen precio para {club}"
-        question = st.text_input("Pregunta", value=q_default)
+        question = st.text_input("Pregunta", value=q_default, key="rag_q")
         clubs = sorted(df_pred["Team"].dropna().unique().tolist()) if "Team" in df_pred.columns else []
-        club_for_ctx = st.selectbox("Club para enriquecer contexto (opcional)", options=clubs) if clubs else ""
-        if st.button("Preguntar"):
+        club_for_ctx = st.selectbox("Club para enriquecer contexto (opcional)", options=clubs, key="rag_club") if clubs else ""
+        if st.button("Preguntar", key="btn_rag"):
             if not api_key:
                 st.warning("Pega tu OPENAI_API_KEY en la barra lateral o define st.secrets/ENV.")
             else:
@@ -976,22 +924,22 @@ with tab_rag:
                 except Exception as e:
                     st.error(f"RAG error: {e}")
 
+# ===============================================================
+# Glosario
+# ===============================================================
 with tab_help:
-    st.subheader("Glosario y criterios")
+    st.subheader("Glosario y criterios (tema chalkboard)")
     st.markdown(
         """
         - **Team within selected timeframe**: cálculos usando sólo tu rango de fechas/temporadas.  
-        - **_GroupPos**: grupo(s) posicional(es) normalizados: Goalkeeper, Fullback, Defender, Midfielder, Wingers, Forward.  
+        - **_GroupPos**: grupos posicionales normalizados: Goalkeeper, Fullback, Defender, Midfielder, Wingers, Forward.  
         - **Centroides ponderados**: si hay columna de minutos, ponderamos los centroides del club por minutos.  
         - **fit_score (0–1)**: similitud PCA jugador↔perfil del club (grupo exacto y vecinos).  
         - **position_match**: 1.0 si match exacto; 0.7 si vecino; 0.2 si ninguno.  
         - **signing_score**: `position_match * (0.55*fit + 0.35*z(predicted)) - 0.10*z(Market value)`.  
-        - **Impacto de fichaje**:  
-          - **Δ Cohesión**: cambio en la similitud promedio de los jugadores del grupo con su centroide tras añadir al jugador.  
-          - **Deriva centroide**: magnitud del desplazamiento del centroide del grupo (espacio PCA).  
-          - **Dictamen**: heurística basada en fit y match posicional.  
-        - **Radar**: comparación del jugador vs. centroide del grupo en un set de features seleccionadas.  
+        - **Impacto de fichaje**: Δ cohesión del grupo y deriva del centroide al añadir minutos del jugador.  
+        - **Radar**: comparación del jugador vs. centroide del grupo en features clave.  
         """.strip()
     )
 
-st.success("Listo. Carga archivos, filtra el timeframe, explora predicciones, encaje, ranking e impacto de fichajes. 👌")
+st.success("Listo. Carga datasets, filtra timeframe y explora predicciones, encaje, ranking e impacto. 👌")
