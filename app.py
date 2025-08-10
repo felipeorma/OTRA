@@ -472,7 +472,7 @@ def train_pipeline(X: pd.DataFrame, y: pd.Series, fast: bool):
     return model, metrics, preds, {"scaled": Xs, "pca": latent}
 
 st.subheader("Entrenamiento")
-model, metrics, y_hat, spaces = train_pipeline(X, y, fast_mode)
+model, metrics, y_hat, spaces = train_pipeline(df_for_model, X, y, fast_mode)
 
 df_pred = df_model.copy()
 df_pred["predicted_value"] = y_hat
