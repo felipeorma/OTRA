@@ -231,12 +231,7 @@ class MarketValueModel:
             random_state=CFG.RANDOM_STATE
         )
     def train(self, X: pd.DataFrame, y: pd.Series) -> Dict[str, float]:
-    """
-    Entrena con holdout + early stopping.
-    - En fast_mode=True: NO hace CV (más veloz).
-    - En fast_mode=False: hace un mini-CV (3 folds) sobre una muestra (<=4k filas).
-    Devuelve: dict con cv_mae (o NaN si fast), holdout_mae y r2.
-    """
+    
     # Holdout
     Xtr, Xte, ytr, yte = train_test_split(
         X, y, test_size=0.2, random_state=CFG.RANDOM_STATE
