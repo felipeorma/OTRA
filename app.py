@@ -158,16 +158,49 @@ def apply_timeframe(df: pd.DataFrame,
     return out.reset_index(drop=True)
 
 def select_numeric(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, List[str]]:
-    """Valida TARGET, filtra NAs, prepara X e y (numérico)."""
+    """Valida TARGET, fuerza numéricos, elimina NaN/Inf y prepara X (float64) e y (float64)."""
     if CFG.TARGET not in df.columns:
         raise ValueError(f"No se encontró la columna objetivo '{CFG.TARGET}'.")
-    df2 = df[df[CFG.TARGET].notna()].copy()
+
+    # 1) Forzar numérico en target y eliminar NaN creados por la coerción
+    df2 = df.copy()
     df2[CFG.TARGET] = pd.to_numeric(df2[CFG.TARGET], errors="coerce")
-    num_cols = [c for c in df2.columns if (np.issubdtype(df2[c].dtype, np.number) and c != CFG.TARGET)]
+
+    # 2) Selección de columnas numéricas y coerción a numérico
+    num_cols = []
+    for c in df2.columns:
+        if c == CFG.TARGET:
+            continue
+        if np.issubdtype(df2[c].dtype, np.number):
+            num_cols.append(c)
+        else:
+            # intentar convertir strings a numérico
+            coerced = pd.to_numeric(df2[c], errors="coerce")
+            if coerced.notna().any():
+                df2[c] = coerced
+                num_cols.append(c)
+
     if not num_cols:
         raise ValueError("No hay columnas numéricas suficientes para entrenar.")
-    X = df2[num_cols].fillna(0.0)
-    y = df2[CFG.TARGET].astype(float)
+
+    # 3) Limpiar Inf/-Inf en features y target
+    df2[num_cols] = df2[num_cols].replace([np.inf, -np.inf], np.nan)
+    df2[CFG.TARGET] = df2[CFG.TARGET].replace([np.inf, -np.inf], np.nan)
+
+    # 4) Eliminar filas donde falte el target o sean todos NaN en features
+    df2 = df2.dropna(subset=[CFG.TARGET])
+    # si una fila tiene todos NaN en features, caerán a 0.0 luego del fillna
+
+    # 5) Construir X e y (float64), rellenando NaN de features con 0
+    X = df2[num_cols].fillna(0.0).astype(np.float64)
+    y = df2[CFG.TARGET].astype(np.float64)
+
+    # Comprobaciones finales
+    if len(X) == 0:
+        raise ValueError("Tras la limpieza, no quedan filas para entrenar.")
+    if np.allclose(y.values, y.values[0]):
+        st.warning("El target es constante tras el filtro; el modelo puede no entrenar correctamente.")
+
     return df2, X, y, num_cols
 
 # -------------------------
@@ -198,40 +231,79 @@ class MarketValueModel:
             random_state=CFG.RANDOM_STATE
         )
     def train(self, X: pd.DataFrame, y: pd.Series) -> Dict[str, float]:
-        # Holdout + early stopping
-        Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, random_state=CFG.RANDOM_STATE)
-        self.model.fit(
-            Xtr, ytr,
-            eval_set=[(Xte, yte)],
-            eval_metric="mae",
-            verbose=False,
-            early_stopping_rounds=50
-        )
-        y_pred = self.model.predict(Xte)
-        holdout_mae = float(mean_absolute_error(yte, y_pred))
-        r2 = float(r2_score(yte, y_pred))
+    """
+    Entrena con holdout + early stopping.
+    - En fast_mode=True: NO hace CV (más veloz).
+    - En fast_mode=False: hace un mini-CV (3 folds) sobre una muestra (<=4k filas).
+    Devuelve: dict con cv_mae (o NaN si fast), holdout_mae y r2.
+    """
+    # Holdout
+    Xtr, Xte, ytr, yte = train_test_split(
+        X, y, test_size=0.2, random_state=CFG.RANDOM_STATE
+    )
 
-        # Mini-CV (opcional) sólo si no es fast_mode
-        if self.fast_mode:
-            cv_mae = np.nan
+    # Convertir a numpy "duro" (float64) para evitar tipos Pandas/nullable
+    Xtr_np = np.asarray(Xtr, dtype=np.float64)
+    Xte_np = np.asarray(Xte, dtype=np.float64)
+    ytr_np = np.asarray(ytr, dtype=np.float64)
+    yte_np = np.asarray(yte, dtype=np.float64)
+
+    # Seguridad extra: comprobar NaN/Inf
+    if (np.isnan(Xtr_np).any() or np.isnan(Xte_np).any() or
+        np.isnan(ytr_np).any() or np.isnan(yte_np).any()):
+        raise ValueError("Hay NaN en X o y tras preprocesar; revisa el dataset o el filtro de timeframe.")
+    if (np.isinf(Xtr_np).any() or np.isinf(Xte_np).any()):
+        raise ValueError("Hay valores Inf en X tras preprocesar.")
+
+    # Entrenamiento con early stopping
+    self.model.fit(
+        Xtr_np, ytr_np,
+        eval_set=[(Xte_np, yte_np)],
+        eval_metric="mae",
+        verbose=False,
+        early_stopping_rounds=50
+    )
+
+    # Métricas en holdout
+    y_pred = self.model.predict(Xte_np)
+    holdout_mae = float(mean_absolute_error(yte_np, y_pred))
+    r2 = float(r2_score(yte_np, y_pred))
+
+    # Mini-CV (opcional) para estimar CV MAE sin "congelar" la app
+    if getattr(self, "fast_mode", True):
+        cv_mae = float("nan")
+    else:
+        n = min(4000, len(X))
+        if n < len(X):
+            rng = np.random.default_rng(CFG.RANDOM_STATE)
+            idx = rng.choice(len(X), size=n, replace=False)
+            X_cv = X.iloc[idx].astype(np.float64)
+            y_cv = y.iloc[idx].astype(np.float64)
         else:
-            n = min(4000, len(X))
-            if n < len(X):
-                rng = np.random.default_rng(CFG.RANDOM_STATE)
-                idx = rng.choice(len(X), size=n, replace=False)
-                X_cv = X.iloc[idx]
-                y_cv = y.iloc[idx]
-            else:
-                X_cv, y_cv = X, y
-            kf = KFold(n_splits=3, shuffle=True, random_state=CFG.RANDOM_STATE)
-            cv_scores = cross_val_score(
-                self.model, X_cv, y_cv, scoring="neg_mean_absolute_error", cv=kf, n_jobs=1
-            )
-            cv_mae = float(-cv_scores.mean())
+            X_cv = X.astype(np.float64)
+            y_cv = y.astype(np.float64)
 
-        return {"cv_mae": cv_mae, "holdout_mae": holdout_mae, "r2": r2}
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
-        return self.model.predict(X)
+        kf = KFold(n_splits=3, shuffle=True, random_state=CFG.RANDOM_STATE)
+        # Nota: para que no reentrene con early stopping en cada fold, usamos self.model.get_xgb_params()
+        # y creamos un modelo "clonado" por fold con los mismos hiperparámetros.
+        scores = []
+        for tr_idx, te_idx in kf.split(X_cv):
+            Xtr_k, Xte_k = X_cv.iloc[tr_idx].to_numpy(dtype=np.float64), X_cv.iloc[te_idx].to_numpy(dtype=np.float64)
+            ytr_k, yte_k = y_cv.iloc[tr_idx].to_numpy(dtype=np.float64), y_cv.iloc[te_idx].to_numpy(dtype=np.float64)
+            mdl = XGBRegressor(**self.model.get_xgb_params())
+            mdl.fit(
+                Xtr_k, ytr_k,
+                eval_set=[(Xte_k, yte_k)],
+                eval_metric="mae",
+                verbose=False,
+                early_stopping_rounds=30
+            )
+            yhat_k = mdl.predict(Xte_k)
+            scores.append(mean_absolute_error(yte_k, yhat_k))
+        cv_mae = float(np.mean(scores)) if scores else float("nan")
+
+    return {"cv_mae": cv_mae, "holdout_mae": holdout_mae, "r2": r2}
+
 
 def plot_importances(model: XGBRegressor, X: pd.DataFrame, top_n: int = 25):
     """Importancias de XGBoost (ligero)."""
